@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "rumi",
+  "project_id": "ef048d18-3752-4f61-a3ee-2e9db14b600b"
+}
