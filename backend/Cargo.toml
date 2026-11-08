@@ -1,0 +1,49 @@
+[package]
+name = "rumi"
+version = "0.1.0"
+edition = "2021"
+description = "RUMI (Rumah Main Islami) backend: Axum JSON API + SPA host over SQLite"
+publish = false
+
+[[bin]]
+name = "rumi"
+path = "src/main.rs"
+
+[[bin]]
+name = "seed"
+path = "src/bin/seed.rs"
+
+[dependencies]
+# web
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "catch-panic", "set-header"] }
+# serde
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# db
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# auth / crypto
+argon2 = "0.5"
+rand = "0.8"
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+# util
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tempfile = "3"
+
+# argon2 is CPU-bound; keep it fast in debug builds so the test suite stays quick.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

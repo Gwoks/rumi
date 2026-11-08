@@ -11,12 +11,29 @@ dist/
 build/
 *.tsbuildinfo
 
+# Vite SPA tooling (frontend lane)
+.vite/
+coverage/
+playwright-report/
+test-results/
+blob-report/
+
+# Rust (backend lane)
+backend/target/
+/target/
+
 # SQLite databases & temp files
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
+*.db*
 backend/data/*.db
+
+# Runtime data (SQLite WAL store lives here; volume-mounted in Docker).
+# Anchored so a future src/data/ is NOT ignored.
+/data/
+backend/data/
 
 # Beads / Dolt files
 .dolt/
@@ -28,6 +45,8 @@ backend/data/*.db
 .env.development.local
 .env.test.local
 .env.production.local
+.env*
+!.env.example
 
 # OS files
 .DS_Store

@@ -1,0 +1,80 @@
+name: Deploy to VPS
+
+# Manual only for now. Switch to `push: branches: [main]` once the VPS_IP,
+# VPS_USER, VPS_SSH_KEY and DOMAIN repository secrets exist.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never run two deploys against the VPS at the same time.
+concurrency:
+  group: deploy-vps
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # The VPS always deploys origin/main, so the pre-flight builds main too
+      # (not whichever ref the workflow was dispatched from).
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      # --- pre-flight: fail cheaply here, not half-way through a VPS build ---
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend
+        run: pnpm build
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+
+      - name: Build Rust backend
+        working-directory: backend
+        run: cargo build --release --bins --locked
+
+      # --- deploy: update the checkout, then run the repo's deploy script ---
+      - name: Deploy to VPS via SSH
+        uses: appleboy/ssh-action@v1
+        env:
+          DOMAIN: ${{ secrets.DOMAIN || 'rumi-stg.kasibah.com' }}
+        with:
+          host: ${{ secrets.VPS_IP }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          envs: DOMAIN
+          script: |
+            set -e
+
+            APP_DIR="/home/ubuntu/rumi"
+            APP_PORT="8080"
+
+            # Pull first so the deploy script that runs is the one from
+            # origin/main. deploy.sh then builds, renders deploy/rumi.service
+            # + deploy/nginx.conf, runs certbot, reloads nginx, restarts rumi
+            # and fails loudly unless /healthz and /api/health answer through
+            # nginx. It is the same script a manual deploy runs.
+            cd "$APP_DIR"
+            git fetch origin main
+            git reset --hard origin/main
+
+            APP_DIR="$APP_DIR" DOMAIN="$DOMAIN" APP_PORT="$APP_PORT" \
+              bash deploy/deploy.sh

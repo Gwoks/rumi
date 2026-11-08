@@ -1,0 +1,144 @@
+/**
+ * RUMI design-system foundation (DESIGN.md "Colors" + "Semantic tokens").
+ *
+ * primitives (RGB channel triples, hex in comments) → semantic CSS vars →
+ * Tailwind utilities (tailwind.config.ts wraps each as
+ * `rgb(var(--color-…) / <alpha-value>)` so opacity modifiers work).
+ *
+ * This is the ONLY file in src/ where raw hex / rgb() / hsl() may appear
+ * (enforced by e2e/no-hex.spec.ts). Light only in v1; the semantic layer keeps
+ * dark mode cheap to add later.
+ */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* ── Brand primitives (template, exact) ── */
+  --teal-500: 42 157 143; /* #2A9D8F Teal */
+  --teal-600: 35 139 127; /* #238B7F Teal Hover */
+  --teal-50: 231 244 240; /* #E7F4F0 Teal Soft */
+  --orange-500: 250 140 66; /* #FA8C42 Orange */
+  --orange-600: 231 126 54; /* #E77E36 Orange Hover */
+  --orange-700: 216 109 41; /* #D86D29 Orange Deep (decorative only) */
+  --orange-50: 255 241 230; /* #FFF1E6 Orange Soft */
+  --yellow-400: 250 208 44; /* #FAD02C Yellow */
+  --yellow-700: 141 113 0; /* #8D7100 Yellow Deep (decorative only) */
+  --yellow-50: 255 247 207; /* #FFF7CF Yellow Soft */
+  --canvas-50: 253 251 247; /* #FDFBF7 Canvas */
+  --white: 255 255 255; /* #FFFFFF White */
+  --ink-700: 45 55 72; /* #2D3748 Ink */
+
+  /* ── AA-derived shades (Phase 0) ── */
+  --teal-700: 31 122 112; /* #1F7A70 Teal Strong */
+  --teal-800: 25 102 94; /* #19665E Teal Strong Hover */
+  --orange-800: 168 80 26; /* #A8501A Orange Strong */
+  --yellow-800: 122 98 0; /* #7A6200 Yellow Strong */
+  --ink-900: 26 32 44; /* #1A202C Ink Deep */
+
+  /* ── Neutrals and status ── */
+  --slate-600: 71 85 105; /* #475569 */
+  --slate-500: 100 116 139; /* #64748B */
+  --slate-450: 124 139 161; /* #7C8BA1 */
+  --slate-400: 148 163 184; /* #94A3B8 */
+  --slate-200: 226 232 240; /* #E2E8F0 Slate Border */
+  --slate-100: 241 245 249; /* #F1F5F9 */
+  --slate-50: 248 250 252; /* #F8FAFC */
+  --red-700: 180 35 24; /* #B42318 */
+  --red-200: 254 205 202; /* #FECDCA */
+  --red-50: 254 243 242; /* #FEF3F2 */
+
+  /* ── Semantic tokens (the only color names code may use) ── */
+  --color-canvas: var(--canvas-50);
+  --color-surface: var(--white);
+  --color-surface-subtle: var(--slate-50);
+  --color-surface-inverse: var(--ink-700);
+  --color-border: var(--slate-200);
+  --color-border-subtle: var(--slate-100);
+  --color-border-strong: var(--slate-450);
+  --color-ink: var(--ink-700);
+  --color-ink-secondary: var(--slate-600);
+  --color-ink-tertiary: var(--slate-500);
+  --color-ink-disabled: var(--slate-400);
+  --color-ink-inverse: var(--white);
+  --color-primary: var(--teal-500);
+  --color-primary-hover: var(--teal-600);
+  --color-primary-strong: var(--teal-700);
+  --color-primary-strong-hover: var(--teal-800);
+  --color-primary-soft: var(--teal-50);
+  --color-primary-on: var(--white);
+  --color-accent: var(--orange-500);
+  --color-accent-hover: var(--orange-600);
+  --color-accent-deep: var(--orange-700);
+  --color-accent-strong: var(--orange-800);
+  --color-accent-soft: var(--orange-50);
+  --color-accent-on: var(--ink-900);
+  --color-highlight: var(--yellow-400);
+  --color-highlight-deep: var(--yellow-700);
+  --color-highlight-strong: var(--yellow-800);
+  --color-highlight-soft: var(--yellow-50);
+  --color-highlight-on: var(--ink-700);
+  --color-danger: var(--red-700);
+  --color-danger-soft: var(--red-50);
+  --color-danger-border: var(--red-200);
+  --color-focus: var(--teal-700);
+
+  /* ── Shadows (built from the ink and teal channels) ── */
+  --shadow-sm: 0 1px 2px 0 rgb(var(--ink-700) / 0.06);
+  --shadow-card:
+    0 10px 15px -3px rgb(var(--ink-700) / 0.08), 0 4px 6px -4px rgb(var(--ink-700) / 0.06);
+  --shadow-cta:
+    0 10px 15px -3px rgb(var(--teal-500) / 0.15), 0 4px 6px -4px rgb(var(--teal-500) / 0.15);
+  --shadow-float:
+    0 20px 25px -5px rgb(var(--ink-700) / 0.15), 0 8px 10px -6px rgb(var(--ink-700) / 0.1);
+  --shadow-modal: 0 25px 50px -12px rgb(var(--ink-700) / 0.25);
+
+  /* ── Motion ── */
+  --dur-fast: 150ms;
+  --dur-base: 200ms;
+  --dur-slow: 300ms;
+  --dur-progress: 1000ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-emphasized: cubic-bezier(0.2, 0.7, 0, 1);
+}
+
+@layer base {
+  html {
+    @apply bg-canvas;
+    scroll-behavior: smooth;
+    color-scheme: light;
+  }
+
+  body {
+    @apply bg-canvas font-sans text-ink antialiased;
+  }
+
+  ::selection {
+    background: rgb(var(--color-highlight));
+    color: rgb(var(--color-highlight-on));
+  }
+
+  button {
+    cursor: pointer;
+  }
+
+  button,
+  a,
+  input,
+  select,
+  textarea {
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
+/* Reduced motion — the template's block, word for word (DESIGN.md base layer). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}

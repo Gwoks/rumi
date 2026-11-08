@@ -1,0 +1,37 @@
+# Keep the build context small and secret-free. The Dockerfile COPYs only what
+# each stage needs; this file mainly stops multi-GB dirs (node_modules,
+# backend/target) and local state from being sent to the daemon.
+
+# VCS / tooling state
+.git
+.github
+.beads
+.claude
+.commandcode
+.gitnexus
+
+# Dependencies and build output (rebuilt inside the image)
+node_modules
+**/node_modules
+dist
+backend/target
+*.tsbuildinfo
+
+# Runtime data (SQLite lives on the rumi_data volume)
+data
+backend/data
+*.db*
+**/*.db*
+
+# Test artifacts
+coverage
+test-results
+playwright-report
+blob-report
+
+# Local env files (secrets)
+.env
+.env.*
+
+# OS noise
+.DS_Store
