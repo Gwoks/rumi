@@ -129,9 +129,16 @@ fn apply_image_url(v: &Value) -> Result<SqlValue, String> {
     if trimmed.is_empty() {
         return Ok(SqlValue::Null);
     }
-    let ok_prefix = trimmed.starts_with("https://") || trimmed.starts_with('/');
-    if !ok_prefix || trimmed.chars().count() > IMAGE_URL_MAX {
-        return Err("Harus diawali https:// atau / (maksimal 500 karakter).".to_string());
+    // §5.8.6: `https://…` or a same-origin `/path`; never a protocol-relative
+    // `//host` and never a backslash (browsers read `/\host` as `//host`).
+    let ok_prefix =
+        trimmed.starts_with("https://") || (trimmed.starts_with('/') && !trimmed.starts_with("//"));
+    let has_backslash = trimmed.contains('\\');
+    if !ok_prefix || has_backslash || trimmed.chars().count() > IMAGE_URL_MAX {
+        return Err(
+            "Harus diawali https:// atau satu / (bukan //), tanpa \\, maksimal 500 karakter."
+                .to_string(),
+        );
     }
     Ok(SqlValue::Text(trimmed.to_string()))
 }
@@ -537,6 +544,15 @@ mod tests {
         assert!(apply(Rule::ImageUrl, &json!("https://x.id/a.png")).is_ok());
         assert!(apply(Rule::ImageUrl, &json!("/brand/a.svg")).is_ok());
         assert!(apply(Rule::ImageUrl, &json!("http://x.id/a.png")).is_err());
+        // Protocol-relative and backslash tricks point at another host.
+        for bad in [
+            "//evil.example/a.png",
+            "/\\evil.example/a.png",
+            "/brand\\a.svg",
+            "https://x.id\\@evil.example/a.png",
+        ] {
+            assert!(apply(Rule::ImageUrl, &json!(bad)).is_err(), "{bad}");
+        }
         assert_eq!(apply(Rule::ImageUrl, &json!("")), Ok(SqlValue::Null));
         assert_eq!(
             apply(PASSWORD, &json!("  short ")),

@@ -20,6 +20,9 @@ export const ROUTES = {
   adminDashboard: '/admin/dashboard',
 } as const
 
+/** The parent dashboard's Pesanan tab (`?tab=orders`). */
+export const PARENT_ORDERS_PATH = `${ROUTES.parentDashboard}?tab=orders`
+
 /** `/parent/report/42` */
 export function parentReportPath(childId: number): string {
   return ROUTES.parentReport.replace(':childId', String(childId))

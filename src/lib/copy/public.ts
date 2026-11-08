@@ -190,10 +190,14 @@ export const publicCopy = {
   'public.checkout.error.already_enrolled': 'Anak sudah terdaftar',
   'public.checkout.error.validation_error': 'Periksa kembali data pesanan',
   'public.checkout.error.not_found': 'Data anak tidak ditemukan',
+  'public.checkout.error.too_many_pending_orders': 'Masih ada pesanan yang menunggu',
   'public.checkout.error.generic': 'Pesanan belum terkirim',
   'public.checkout.error.cartHint': 'Ubah isi keranjang, lalu kirim ulang pesanan.',
   'public.checkout.error.detailsHint': 'Perbarui detail pesanan, lalu kirim ulang.',
   'public.checkout.error.retryHint':
     'Aman untuk mencoba lagi — pesanan yang sama tidak akan tercatat dua kali.',
   'public.checkout.error.editDetails': 'Ubah detail',
+  'public.checkout.error.ordersHint':
+    'Kirim pesan WhatsApp untuk pesanan yang sudah ada atau tunggu konfirmasi admin RUMI, lalu buat pesanan baru. Isi keranjang Anda tetap tersimpan.',
+  'public.checkout.error.viewOrders': 'Lihat pesanan saya',
 } as const

@@ -1,12 +1,14 @@
 /**
- * `/reset-password?token=` (PRD §5.8.3 #12): a new password + confirmation.
- * The server revokes every session on success and does not sign the user in,
- * so the local auth state is cleared and the user is pointed to /login. An
- * `invalid_token` (unknown, expired or used) offers a fresh reset link.
+ * `/reset-password#token=` (PRD §5.8.3 #11–#12): a new password +
+ * confirmation. The token is read once from the fragment (or a legacy
+ * `?token=`) and then scrubbed from the address bar. The server revokes every
+ * session on success and does not sign the user in, so the local auth state
+ * is cleared and the user is pointed to /login. An `invalid_token` (unknown,
+ * expired or used) offers a fresh reset link.
  */
 import { CheckCircle2 } from 'lucide-react'
-import { useRef, useState } from 'react'
-import { Link, useSearchParams } from 'react-router-dom'
+import { useEffect, useRef, useState } from 'react'
+import { Link, useLocation } from 'react-router-dom'
 import { clearAuth } from '@/api/auth-store'
 import { api } from '@/api/client'
 import { isApiError } from '@/api/errors'
@@ -16,11 +18,10 @@ import { Field, Input } from '@/components/ui/input'
 import { apiErrorMessage, apiFieldErrors } from '@/lib/api-errors'
 import { t } from '@/lib/copy'
 import { ROUTES } from '@/lib/navigation'
+import { isUsableResetToken, readResetToken, scrubResetTokenFromUrl } from '@/lib/reset-token'
 import { focusFirstInvalid, pickFieldErrors, useForm } from '@/lib/use-form'
 import { resetPasswordFormSchema } from '@/lib/validation'
 import { AuthCard, FormAlert } from './auth-card'
-
-const MAX_TOKEN_LENGTH = 200
 
 type Outcome = 'form' | 'done' | 'invalid'
 
@@ -59,14 +60,17 @@ function ResetDone() {
 }
 
 export function ResetPasswordScreen() {
-  const [params] = useSearchParams()
-  const token = params.get('token')?.trim() ?? ''
-  const isTokenUsable = token.length > 0 && token.length <= MAX_TOKEN_LENGTH
+  const location = useLocation()
+  const [token] = useState(() => readResetToken(location.hash, location.search))
   const form = useForm({ password: '', password_confirm: '' })
-  const [outcome, setOutcome] = useState<Outcome>(isTokenUsable ? 'form' : 'invalid')
+  const [outcome, setOutcome] = useState<Outcome>(isUsableResetToken(token) ? 'form' : 'invalid')
   const [formError, setFormError] = useState<string | null>(null)
   const [isSubmitting, setSubmitting] = useState(false)
   const formRef = useRef<HTMLFormElement>(null)
+
+  useEffect(() => {
+    scrubResetTokenFromUrl()
+  }, [])
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault()

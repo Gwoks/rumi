@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use crate::auth::ParentUser;
 use crate::error::{created, ok, ApiError, ApiResult};
 use crate::extract::{ApiJson, IdPath};
+use crate::middleware::{take_token, RATE_WINDOW_SECS};
 use crate::models::child::{self, Child, CHILD_SPECS};
 use crate::models::order::{self, Order};
 use crate::models::{assessment, enrollment};
@@ -130,12 +131,16 @@ fn checkout_result(order: Order) -> Value {
     json!({ "wa_url": order.wa_url.clone(), "order": order })
 }
 
-/// #21: checkout (§5.9.1). `201` for a new order, `200` for a replay.
+/// #21: checkout (§5.9.1). `201` for a new order, `200` for a replay. Every
+/// request takes a token from the parent's checkout bucket first (§5.3.4).
 async fn create_order(
     State(state): State<AppState>,
     ParentUser(user): ParentUser,
     ApiJson(body): ApiJson<Value>,
 ) -> ApiResult {
+    let bucket = format!("orders:parent:{}", user.id);
+    let limit = state.cfg.order_rate_limit_per_min;
+    take_token(&state.limiter, &bucket, limit, RATE_WINDOW_SECS)?;
     if let Some(key) = checkout::replay_key(&body) {
         if let Some(existing) = order::find_by_key(&state.pool, &state.cfg, user.id, &key).await? {
             return ok(checkout_result(existing));

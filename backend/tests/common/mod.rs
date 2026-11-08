@@ -42,11 +42,14 @@ pub fn test_config() -> Config {
         admin_email: String::new(),
         admin_password: String::new(),
         seed_demo: false,
+        allow_demo_seed_in_prod: false,
         pending_order_ttl_hours: 48,
         session_ttl_days: 30,
         // Every oneshot request shares the "unknown" client IP; keep the auth
         // buckets out of the way except in the dedicated rate-limit test.
         auth_rate_limit_per_min: 1_000_000,
+        order_rate_limit_per_min: 10,
+        max_pending_orders_per_parent: 3,
         cookie_secure: CookieSecure::Never,
         sweep_interval_seconds: 300,
     }

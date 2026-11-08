@@ -57,13 +57,20 @@ export async function bootstrapAuth(): Promise<void> {
   await refreshAuth()
 }
 
-/** Re-check the session without a loading state (cross-tab sync). */
+/**
+ * Re-check the session without a loading state (cross-tab sync). A transient
+ * failure (offline, 5xx) while a session is already `ready` keeps the current
+ * state, so a dashboard is never unmounted by a flaky re-check; a real logout
+ * in another tab still arrives as `{ user: null }` or a 401 on the next call.
+ */
 export async function refreshAuth(): Promise<void> {
   try {
     const { user } = await api.me()
     setAuthUser(user)
   } catch (err) {
-    authStore.setState((prev) => ({ ...prev, status: 'error', error: toApiError(err) }))
+    authStore.setState((prev) =>
+      prev.status === 'ready' ? prev : { ...prev, status: 'error', error: toApiError(err) },
+    )
   }
 }
 

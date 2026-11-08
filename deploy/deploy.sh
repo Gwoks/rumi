@@ -67,6 +67,8 @@ main() {
 
   echo "==> Preparing data dir, permissions and secrets"
   mkdir -p "$APP_DIR/data"
+  # The SQLite DB holds sessions and password hashes: owner-only.
+  chmod 700 "$APP_DIR/data"
   # nginx (www-data) must be able to traverse into $APP_DIR/dist.
   sudo chmod o+x "$(dirname "$APP_DIR")"
   if ! sudo test -f "$ENV_FILE"; then

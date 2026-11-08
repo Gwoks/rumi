@@ -1,7 +1,7 @@
 //! Request extractors that reject with the API envelope (PRD §5.1, §5.4.8).
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{ConnectInfo, FromRequest, FromRequestParts, Path, Query, Request};
@@ -205,6 +205,25 @@ pub fn effective_client_ip(peer: Option<SocketAddr>, headers: &HeaderMap) -> Str
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+/// The rate-limit subject for a client IP (§5.3.4): IPv4 as-is, IPv6 by its
+/// /64 prefix (one subscriber usually owns a whole /64), an IPv4-mapped IPv6
+/// address as its IPv4, and anything that is not an IP unchanged.
+pub fn rate_limit_subject(ip: &str) -> String {
+    let trimmed = ip.trim();
+    match trimmed.parse::<IpAddr>() {
+        Ok(IpAddr::V4(v4)) => v4.to_string(),
+        Ok(IpAddr::V6(v6)) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => {
+                let s = v6.segments();
+                let prefix = Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0);
+                format!("{prefix}/64")
+            }
+        },
+        Err(_) => trimmed.to_string(),
+    }
+}
+
 /// The client IP of a request, read from its `ConnectInfo` extension.
 pub fn client_ip(extensions: &axum::http::Extensions, headers: &HeaderMap) -> String {
     let peer = extensions
@@ -258,6 +277,20 @@ mod tests {
             client_ip(&axum::http::Extensions::new(), &HeaderMap::new()),
             "unknown"
         );
+    }
+
+    #[test]
+    fn rate_limit_subject_groups_ipv6_by_64() {
+        assert_eq!(rate_limit_subject("203.0.113.7"), "203.0.113.7");
+        assert_eq!(rate_limit_subject("2001:db8:1:2::1"), "2001:db8:1:2::/64");
+        assert_eq!(
+            rate_limit_subject("2001:0db8:0001:0002:abcd:ef01:2345:6789"),
+            "2001:db8:1:2::/64"
+        );
+        assert_eq!(rate_limit_subject("::ffff:203.0.113.7"), "203.0.113.7");
+        assert_eq!(rate_limit_subject("::1"), "::/64");
+        assert_eq!(rate_limit_subject(" 2001:db8::9 "), "2001:db8::/64");
+        assert_eq!(rate_limit_subject("unknown"), "unknown");
     }
 
     fn params(pairs: &[(&str, &str)]) -> QueryParams {

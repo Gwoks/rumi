@@ -129,7 +129,9 @@ An unknown `/api/*` path returns a JSON 404, never the SPA.
 - A flat `createBrowserRouter`, with `<RequireRole role="PARENT|ADMIN">` guarding protected routes.
 - One `api` object, with one method per contract route.
 - `parseJsonResponse` validates `envelope(schema)` with zod. A mismatch becomes `contract_mismatch`, and a 401 `unauthorized` redirects to `/login?next=…`.
-- `authStore` bootstraps from `GET /api/auth/me`. `cartStore` persists to localStorage and syncs across tabs. Both use `createPersistedStore` with `useSyncExternalStore`.
+- `authStore` (`src/api/auth-store.ts`) is **in memory only**: it bootstraps from `GET /api/auth/me`, and login, register and logout write a PII-free timestamp under `rumi-auth-signal` so other tabs silently re-check `/api/auth/me`. A failed re-check keeps an already-`ready` session instead of unmounting the dashboard.
+- Only `cartStore` (`src/stores/cart.ts`) persists, to localStorage (`rumi-cart-v1`), and syncs across tabs through the `storage` event.
+- Both are `createStore` instances (`src/lib/create-store.ts`; the cart passes a `persist` option) read through `useSyncExternalStore` hooks.
 
 ## Conventions & Patterns
 
@@ -166,10 +168,10 @@ An unknown `/api/*` path returns a JSON 404, never the SPA.
 **Copy:**
 - The UI is in **Bahasa Indonesia** only.
 - Backend error messages are Indonesian sentences.
-- Frontend strings come from `t()` in `src/lib/copy.ts`. There are no inline literals in components.
+- Frontend strings come from `t()` in `src/lib/copy/` (`index.ts` exports `t()`; the strings live in per-area files `common.ts`, `public.ts`, `auth.ts`, `parent.ts`, `admin.ts` and `design-kit.ts`, whose key prefixes `copy.test.ts` enforces). There are no inline literals in components.
 
 **Security:**
-- No secrets in code. The admin account comes from `ADMIN_EMAIL` and `ADMIN_PASSWORD`; demo data appears only with `SEED_DEMO=true`.
+- No secrets in code. The admin account comes from `ADMIN_EMAIL` and `ADMIN_PASSWORD`; demo data appears only with `SEED_DEMO=true`, and is refused on an `https://` `PUBLIC_BASE_URL` unless `ALLOW_DEMO_SEED_IN_PROD=true`.
 - Logs never include cookies, passwords, tokens or request bodies.
 
 ### Backend (Rust)
@@ -215,7 +217,7 @@ An unknown `/api/*` path returns a JSON 404, never the SPA.
 - Screens never call `fetch` directly; `e2e/import-boundaries.spec.ts` enforces this.
 
 **State:**
-- `createPersistedStore` (`src/lib/create-store.ts`) holds a listener `Set`, localStorage, and a cross-tab `storage` event.
+- `createStore` (`src/lib/create-store.ts`) holds a listener `Set`; with the optional `persist` option it also writes localStorage and listens for the cross-tab `storage` event (used by the cart only — auth stays in memory).
 - Components read it through `useSyncExternalStore` hooks (`useAuth`, `useCart`).
 - Don't add Redux, Zustand or react-query.
 

@@ -577,3 +577,153 @@ async fn concurrent_duplicate_submits_create_one_order() {
         1
     );
 }
+
+#[tokio::test]
+async fn pending_orders_are_capped_per_parent_but_replays_still_answer_200() {
+    let w = world().await;
+    let mut ids = Vec::new();
+    for n in 1..=3 {
+        let r = checkout(
+            &w.t,
+            &w.parent.cookie,
+            &uuid(n),
+            json!([kit_item(w.kit, 1)]),
+        )
+        .await;
+        assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+        ids.push(r.data()["order"]["id"].as_i64().unwrap());
+    }
+    let capped = checkout(
+        &w.t,
+        &w.parent.cookie,
+        &uuid(4),
+        json!([kit_item(w.kit, 1)]),
+    )
+    .await;
+    assert_eq!(capped.status, StatusCode::CONFLICT);
+    assert_eq!(capped.code(), "too_many_pending_orders");
+    assert!(
+        capped.body["error"].as_str().unwrap().contains("3 pesanan"),
+        "{}",
+        capped.text
+    );
+    // Nothing was reserved or numbered for the refused order.
+    assert_eq!(scalar(&w.t.pool, "SELECT stock FROM play_kits").await, 9);
+    assert_eq!(scalar(&w.t.pool, "SELECT COUNT(*) FROM orders").await, 3);
+
+    // A replay of an existing order is answered before the cap.
+    let replay = checkout(
+        &w.t,
+        &w.parent.cookie,
+        &uuid(1),
+        json!([kit_item(w.kit, 1)]),
+    )
+    .await;
+    assert_eq!(replay.status, StatusCode::OK);
+    assert_eq!(replay.data()["order"]["id"], ids[0]);
+
+    // Another parent is not affected.
+    let other = register(&w.t, "siti@example.com").await;
+    let theirs = checkout(&w.t, &other.cookie, &uuid(9), json!([kit_item(w.kit, 1)])).await;
+    assert_eq!(theirs.status, StatusCode::CREATED);
+
+    // Paid and cancelled orders do not count.
+    assert_eq!(set_status(&w, ids[0], "PAID").await.status, StatusCode::OK);
+    assert_eq!(
+        set_status(&w, ids[1], "CANCELLED").await.status,
+        StatusCode::OK
+    );
+    for n in 5..=6 {
+        let r = checkout(
+            &w.t,
+            &w.parent.cookie,
+            &uuid(n),
+            json!([kit_item(w.kit, 1)]),
+        )
+        .await;
+        assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+    }
+    let again = checkout(
+        &w.t,
+        &w.parent.cookie,
+        &uuid(7),
+        json!([kit_item(w.kit, 1)]),
+    )
+    .await;
+    assert_eq!(again.code(), "too_many_pending_orders");
+}
+
+#[tokio::test]
+async fn zero_disables_the_pending_cap() {
+    let cfg = rumi::config::Config {
+        max_pending_orders_per_parent: 0,
+        ..test_config()
+    };
+    let t = app_with(cfg).await;
+    let p = register(&t, "nadia@example.com").await;
+    let kit = insert_kit(&t.pool, "Kit", 1_000, 50).await;
+    for n in 1..=5 {
+        let r = checkout(&t, &p.cookie, &uuid(n), json!([kit_item(kit, 1)])).await;
+        assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+    }
+}
+
+#[tokio::test]
+async fn checkout_is_rate_limited_per_parent() {
+    let cfg = rumi::config::Config {
+        order_rate_limit_per_min: 2,
+        max_pending_orders_per_parent: 0,
+        ..test_config()
+    };
+    let t = app_with(cfg).await;
+    let p = register(&t, "nadia@example.com").await;
+    let kit = insert_kit(&t.pool, "Kit", 1_000, 50).await;
+    for n in 1..=2 {
+        let r = checkout(&t, &p.cookie, &uuid(n), json!([kit_item(kit, 1)])).await;
+        assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+    }
+    let limited = checkout(&t, &p.cookie, &uuid(3), json!([kit_item(kit, 1)])).await;
+    assert_eq!(limited.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(limited.code(), "rate_limited");
+    let retry: i64 = limited.header("retry-after").unwrap().parse().unwrap();
+    assert!(retry >= 1);
+    assert_eq!(scalar(&t.pool, "SELECT COUNT(*) FROM orders").await, 2);
+    // The bucket is per parent, not global.
+    let other = register(&t, "siti@example.com").await;
+    let theirs = checkout(&t, &other.cookie, &uuid(4), json!([kit_item(kit, 1)])).await;
+    assert_eq!(theirs.status, StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn class_only_checkout_ignores_the_address_entirely() {
+    let w = world().await;
+    let body = json!({
+        "idempotency_key": uuid(1),
+        "items": [class_item(w.class, w.parent.child_id)],
+        "delivery": {"name": "Nadia Rahman", "phone_wa": "0812-1111-2222", "address": "x".repeat(600)},
+    });
+    let r = call(
+        &w.t,
+        "POST",
+        "/api/orders",
+        Some(&w.parent.cookie),
+        Some(body),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text);
+    assert_eq!(r.data()["order"]["delivery_address"], Value::Null);
+    let odd = json!({
+        "idempotency_key": uuid(2),
+        "items": [class_item(w.class, w.parent.child_id)],
+        "delivery": {"name": "Nadia Rahman", "phone_wa": "0812-1111-2222", "address": 42},
+    });
+    let r2 = call(
+        &w.t,
+        "POST",
+        "/api/orders",
+        Some(&w.parent.cookie),
+        Some(odd),
+    )
+    .await;
+    assert_eq!(r2.code(), "already_enrolled", "{}", r2.text);
+}

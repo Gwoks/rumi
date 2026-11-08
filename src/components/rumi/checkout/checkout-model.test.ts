@@ -5,8 +5,11 @@ import type { CartItem } from '@/stores/cart'
 import {
   buildCheckoutBody,
   checkoutErrorView,
+  checkoutFingerprint,
   newIdempotencyKey,
+  nextAttempt,
   safeHttpsUrl,
+  stableStringify,
   type DeliveryData,
 } from './checkout-model'
 
@@ -90,6 +93,7 @@ describe('checkoutErrorView', () => {
     ['class_full', 'Kelas sudah penuh', 'cart'],
     ['item_unavailable', 'Item sudah tidak tersedia', 'cart'],
     ['already_enrolled', 'Anak sudah terdaftar', 'details'],
+    ['too_many_pending_orders', 'Masih ada pesanan yang menunggu', 'orders'],
     ['not_found', 'Data anak tidak ditemukan', 'details'],
     ['internal', 'Pesanan belum terkirim', 'retry'],
     ['network_error', 'Pesanan belum terkirim', 'retry'],
@@ -132,6 +136,39 @@ describe('checkoutErrorView', () => {
       recovery: 'retry',
       message: 'Terjadi kesalahan. Coba lagi.',
     })
+  })
+})
+
+describe('checkout attempts (stable key per request body)', () => {
+  const body = (delivery: DeliveryData, items: CartItem[] = [CLASS, KIT]) => {
+    const built = buildCheckoutBody(items, delivery, 'ignored-key')
+    if (!built) throw new Error('body')
+    return built
+  }
+
+  it('serializes objects with sorted keys', () => {
+    expect(stableStringify({ b: 1, a: [{ d: null, c: 'x' }] })).toBe(
+      '{"a":[{"c":"x","d":null}],"b":1}',
+    )
+    expect(stableStringify('x')).toBe('"x"')
+  })
+
+  it('fingerprints items, delivery and notes but not the key', () => {
+    const a = checkoutFingerprint(body(DELIVERY))
+    const sameWithOtherKey = checkoutFingerprint({ ...body(DELIVERY), idempotency_key: 'other' })
+    expect(sameWithOtherKey).toBe(a)
+    expect(checkoutFingerprint(body({ ...DELIVERY, address: 'Jl. Damai 1' }))).not.toBe(a)
+    expect(checkoutFingerprint(body({ ...DELIVERY, notes: 'Mohon cepat' }))).not.toBe(a)
+    expect(checkoutFingerprint(body(DELIVERY, [CLASS, { ...KIT, quantity: 3 }]))).not.toBe(a)
+  })
+
+  it('reuses the key while the request is unchanged', () => {
+    const makeKey = vi.fn().mockReturnValueOnce('key-1').mockReturnValueOnce('key-2')
+    const first = nextAttempt(null, 'fp-a', makeKey)
+    expect(first).toEqual({ key: 'key-1', fingerprint: 'fp-a' })
+    expect(nextAttempt(first, 'fp-a', makeKey)).toBe(first)
+    expect(nextAttempt(first, 'fp-b', makeKey)).toEqual({ key: 'key-2', fingerprint: 'fp-b' })
+    expect(makeKey).toHaveBeenCalledTimes(2)
   })
 })
 

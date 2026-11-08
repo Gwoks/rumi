@@ -1,6 +1,6 @@
 # PRD: RUMI v1 — Rust/Axum + SQLite + React SPA rebuild (slug: `rumi-v1`)
 
-- **Status:** FROZEN at Phase 0 (2026-11-08). §5 is the interface contract.
+- **Status:** FROZEN at Phase 0 (2026-11-08). §5 is the interface contract. Amended 2026-11-09 by the review-hardening pass (rumi-0sw.12, §6 items 22–31).
 - **Inputs:**
   - the approved plan (`~/.claude/plans/pasted-content-id-0c02-act-as-immutable-twilight.md`)
   - the visual template `../rumi-v0-template/app/page.tsx`
@@ -76,7 +76,7 @@ Bahasa Indonesia is the only UI language. Prices are in Rupiah. Times are in WIB
 - `/login`
 - `/register`: 3 steps (parent, child, success)
 - `/forgot-password`
-- `/reset-password?token=`
+- `/reset-password#token=` (the legacy `?token=` form is still accepted)
 
 **Parent pages:**
 - `/parent/dashboard`, with a child switcher and the tabs Ringkasan, Kehadiran, Perkembangan and Pesanan
@@ -99,7 +99,7 @@ Bahasa Indonesia is the only UI language. Prices are in Rupiah. Times are in WIB
 ### 4.2 Non-goals (v1)
 
 - Online payment gateways. Payment is confirmed by hand over WhatsApp.
-- Sending email. Password-reset links go through a `Notifier`, and the default `LogNotifier` writes them to the server log. SMTP is a follow-up issue.
+- Sending email. Password-reset links go through a `Notifier`. The default `LogNotifier` writes the link to the server log **only in development** (`PUBLIC_BASE_URL` empty or not `https://`); otherwise it logs a masked email and "reset requested", never the token. SMTP is a follow-up issue (rumi-0sw.10).
 - Photo galleries and uploads. The template's gallery and uploader are out of scope.
 - Dark mode and other UI languages.
 - Parents cancelling their own orders.
@@ -160,11 +160,12 @@ Bahasa Indonesia is the only UI language. Prices are in Rupiah. Times are in WIB
 | 409 | `already_enrolled` | Checkout: the child already has a non-cancelled enrollment in that class | "{anak} sudah terdaftar di kelas {judul}." |
 | 409 | `class_full` | Checkout: no seats are left | "Kelas {judul} sudah penuh." |
 | 409 | `out_of_stock` | Checkout: there is not enough kit stock | "Stok {nama} tidak mencukupi (tersisa {n})." |
+| 409 | `too_many_pending_orders` | Checkout: the parent already has `MAX_PENDING_ORDERS_PER_PARENT` orders in `PENDING_WA` (§5.9.1 step 5) | "Anda masih memiliki {n} pesanan yang menunggu konfirmasi. Selesaikan atau tunggu konfirmasi pesanan tersebut sebelum membuat pesanan baru." |
 | 409 | `invalid_transition` | The order-status or attendance state machine rejects the change | "Status tidak dapat diubah dari {dari} ke {ke}." |
 | 413 | `payload_too_large` | The body is over 64 KiB | "Ukuran permintaan terlalu besar." |
 | 422 | `validation_error` | Well-formed JSON breaks a rule in §5; also bad query params, and a PATCH with no recognised field | specific |
 | 422 | `invalid_token` | The reset-password token is unknown, expired or already used | "Tautan reset tidak valid atau sudah kedaluwarsa." |
-| 429 | `rate_limited` | The auth rate limit is exceeded. Always sent with the header `Retry-After: <integer seconds ≥ 1>` | "Terlalu banyak percobaan. Coba lagi dalam {n} detik." |
+| 429 | `rate_limited` | A rate limit in §5.3.4 is exceeded: an auth bucket, the per-email login-failure bucket, or the per-parent checkout bucket. Always sent with the header `Retry-After: <integer seconds ≥ 1>` | "Terlalu banyak percobaan. Coba lagi dalam {n} detik." |
 | 500 | `internal` | Any unexpected failure, including a panic caught by `CatchPanicLayer` | "Terjadi kesalahan pada server." |
 | 503 | `unavailable` | SQLite is busy, the pool times out, or the health DB probe fails | "Layanan sedang sibuk. Coba lagi sebentar lagi." |
 
@@ -214,11 +215,26 @@ The check applies to every `POST`, `PUT`, `PATCH` and `DELETE` under `/api`, the
 
 #### 5.3.4 Rate limiting
 
-- A token bucket is kept per **(endpoint, client IP)** for four endpoints: `POST /api/auth/register`, `/login`, `/forgot-password` and `/reset-password`.
+Every limit below is a token bucket that refills continuously. When a bucket is empty, the server returns `429 rate_limited` with `Retry-After`.
+
+**Auth endpoints (per endpoint and client):**
+- A bucket is kept per **(endpoint, client subject)** for four endpoints: `POST /api/auth/register`, `/login`, `/forgot-password` and `/reset-password`.
 - Each bucket holds `AUTH_RATE_LIMIT_PER_MIN` tokens and refills continuously at that many tokens per minute.
 - Every request takes one token, whatever its outcome.
-- When the bucket is empty, the server returns `429 rate_limited` with `Retry-After`.
 - The client IP is the TCP peer address. `X-Real-IP` and the first `X-Forwarded-For` entry are trusted **only** when the peer is loopback (nginx). This is hookbox's `effective_client_ip`.
+- The **client subject** is the client IP for IPv4. An IPv6 client is keyed by its **/64 prefix** (for example `2001:db8:1:2::/64`), because one subscriber usually controls a whole /64; an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) counts as its IPv4. A value that is not an IP address is used as it is.
+
+**Login failures (per email):**
+- A second bucket is kept per **normalized email** (§5.4.5) for `POST /api/auth/login`. It holds **5** tokens and refills at 5 tokens per **15 minutes** (one every 3 minutes).
+- Every login attempt for that email takes one token **before** the password is checked, so a parallel burst cannot slip past the limit. A successful login clears the bucket, so in effect only failures add up.
+- While the bucket is empty, a login for that email is refused with `429 rate_limited`, even when the password is right.
+- Unknown emails get a bucket too, so the answer never reveals whether an account exists.
+
+**Checkout (per parent):**
+- A bucket is kept per signed-in parent for `POST /api/orders`, holding `ORDER_RATE_LIMIT_PER_MIN` tokens and refilling at that many per minute.
+- Every request takes one token, replays included. It is checked right after auth (§5.9.1 step 1).
+
+A limit `≤ 0` in §5.10 disables that bucket.
 
 ### 5.4 Formats and normalization
 
@@ -835,7 +851,7 @@ type LoginBody = { email: string, password: string }   // email normalized; pass
 
 **#8 `POST /api/auth/login`**
 - Success: `200 { user }`, and the cookie is set.
-- Errors: `401 invalid_credentials`, `429 rate_limited`.
+- Errors: `401 invalid_credentials`, `429 rate_limited` (per client or per email, §5.3.4).
 - A soft-deleted user gets `invalid_credentials`.
 
 **#9 `POST /api/auth/logout`**
@@ -852,8 +868,10 @@ type LoginBody = { email: string, password: string }   // email normalized; pass
 - An email in the wrong format gets `422`.
 - Otherwise the response is **always** `200 null`, whether or not the email exists.
 - If an active user has that email:
-  1. Create a single-use token (32 CSPRNG bytes, base64url) that lives **60 minutes**. Only its SHA-256 is stored.
-  2. Call `Notifier::send_password_reset(email, url)` with `url = {base}/reset-password?token={token}`. `{base}` is `PUBLIC_BASE_URL` with any trailing `/` removed; if it is empty, `{base}` is `http://localhost:{APP_PORT}`.
+  1. Mark every unused reset token of that user used, so only the newest link works.
+  2. Create a single-use token (32 CSPRNG bytes, base64url) that lives **60 minutes**. Only its SHA-256 is stored.
+  3. Call `Notifier::send_password_reset(email, url)` with `url = {base}/reset-password#token={token}`. `{base}` is `PUBLIC_BASE_URL` with any trailing `/` removed; if it is empty, `{base}` is `http://localhost:{APP_PORT}`.
+- The token travels in the URL **fragment**, which browsers never send to the server, so it cannot land in nginx or app access logs. The SPA reads `#token=` (and, as a fallback for links sent before this change, `?token=`) and then removes it from the address bar with `history.replaceState`.
 - Errors: `429 rate_limited`.
 
 **#12 `POST /api/auth/reset-password`**
@@ -861,7 +879,7 @@ type LoginBody = { email: string, password: string }   // email normalized; pass
 - A token that is unknown, expired or already used gets `422 invalid_token`.
 - On success the server:
   1. sets the new password hash;
-  2. marks the token used;
+  2. marks **every** unused reset token of that user used (the presented one included);
   3. **deletes every session of that user**;
   4. clears the cookie.
 - It does **not** sign the user in.
@@ -917,14 +935,14 @@ type CheckoutBody = {
   delivery: {
     name: string            // 2–100
     phone_wa: string        // §5.4.6
-    address?: string | null // ≤ 500; REQUIRED (non-empty) iff any KIT item; ignored and stored null when there is no KIT item
+    address?: string | null // ≤ 500; REQUIRED (non-empty) iff any KIT item; ignored (not validated) and stored null when there is no KIT item
   }
   notes?: string | null     // ≤ 500
 }
 ```
 
 - Success: `201 CheckoutResult` for a new order, or `200 CheckoutResult` for an idempotent replay.
-- Errors: `404 not_found` when a `child_id` is not the caller's; `409 item_unavailable | already_enrolled | class_full | out_of_stock`.
+- Errors: `404 not_found` when a `child_id` is not the caller's; `409 item_unavailable | already_enrolled | class_full | out_of_stock | too_many_pending_orders`; `429 rate_limited` (§5.3.4).
 - The full algorithm is in §5.9.1.
 
 #### 5.8.5 Admin
@@ -1055,7 +1073,7 @@ type AssessmentCreate = {
 
 #### 5.8.6 Shared field rule: `image_url`
 
-`image_url` is either `null` or a string of at most 500 characters that starts with `https://` or with `/` (a same-origin path such as `/brand/…`). Anything else gets `422`.
+`image_url` is either `null` or a string of at most 500 characters that starts with `https://` or with `/` (a same-origin path such as `/brand/…`). It must **not** start with `//` (a protocol-relative URL that points at another host) and must **not** contain a backslash `\` anywhere (browsers treat `/\host` like `//host`). Anything else gets `422`.
 
 ### 5.9 Business rules
 
@@ -1063,11 +1081,12 @@ type AssessmentCreate = {
 
 The steps run in this order, and the first failure wins:
 
-1. **Auth.** The caller must be `PARENT`. Then the body is parsed (§5.1).
+1. **Auth.** The caller must be `PARENT`. Then the per-parent checkout rate limit (§5.3.4) takes a token; an empty bucket gets `429 rate_limited`. Then the body is parsed (§5.1).
 2. **Idempotent replay.** If an order exists with `(parent_id, idempotency_key)`, the server returns `200 { order, wa_url }` for it **as it is now**. The status may already be `PAID` or `CANCELLED`. Nothing else is checked, and nothing is changed.
 3. **Field validation** (`422`). This covers the rules in §5.8.4: item count, duplicates, quantities, delivery fields, address-if-kit and notes.
 4. **Ownership.** Every `child_id` must belong to the caller and not be deleted. Otherwise `404 not_found` ("Data anak tidak ditemukan.").
 5. **Transaction.** One `BEGIN IMMEDIATE` transaction handles the items in request order. On the first failure everything rolls back, so nothing is reserved.
+   - **Pending cap (first).** After re-checking the replay (see *Concurrent duplicates*), the server counts the caller's orders in `PENDING_WA`. If there are already `MAX_PENDING_ORDERS_PER_PARENT` or more → `409 too_many_pending_orders`, and nothing is reserved. `0` disables the cap. Because step 2 runs first, a replay of an existing order always answers `200`, even at the cap.
    - **CLASS item:**
      1. If the class is missing, deleted, not `OPEN` or not upcoming → `409 item_unavailable`.
      2. If the child has a non-`CANCELLED` enrollment in that class → `409 already_enrolled`.
@@ -1196,10 +1215,10 @@ All the changes for one transition happen in one transaction.
 
 #### 5.9.6 Sweep task (every `SWEEP_INTERVAL_SECONDS`)
 
-1. Cancel every `PENDING_WA` order where `now ≥ created_at + PENDING_ORDER_TTL_HOURS`, using exactly the §5.9.4 `PENDING_WA → CANCELLED` effects.
+1. Cancel every `PENDING_WA` order where `now ≥ created_at + PENDING_ORDER_TTL_HOURS`, using exactly the §5.9.4 `PENDING_WA → CANCELLED` effects. Each order is its own transaction: a failure is logged with the order id and the sweep moves on to the next order. A failure of this whole step never skips steps 2–4.
 2. Delete `auth_sessions` rows that have expired.
 3. Delete `password_resets` rows that expired, or that were used more than 24 hours ago.
-4. Evict rate-limit buckets that have been idle for at least 10 minutes.
+4. Evict rate-limit buckets that have been idle for at least 10 minutes **and** have refilled completely (a full bucket behaves exactly like a missing one, so eviction never loosens a limit).
 
 ### 5.10 Configuration (environment)
 
@@ -1215,10 +1234,13 @@ The app never crashes because a variable is missing. It falls back to a safe def
 | `RUMI_ADMIN_WA_PHONE` | `6281234567890` | The admin's WhatsApp number for `wa.me`, normalized per §5.4.6. If it is invalid, the server falls back to the default and logs a WARN |
 | `ADMIN_EMAIL` | `""` | Bootstrap admin email (§5.11.1) |
 | `ADMIN_PASSWORD` | `""` | Bootstrap admin password, at least 8 characters. A shorter one is refused with an ERROR log, and no admin is created |
-| `SEED_DEMO` | `false` | When `true`, adds the demo accounts and data (§5.11.4) |
+| `SEED_DEMO` | `false` | When `true`, adds the demo accounts and data (§5.11.4). Refused when `PUBLIC_BASE_URL` starts with `https://`, unless `ALLOW_DEMO_SEED_IN_PROD=true` (§5.11.1) |
+| `ALLOW_DEMO_SEED_IN_PROD` | `false` | Lets `SEED_DEMO=true` run on an `https://` deployment (a public demo). Leave it off in production |
 | `PENDING_ORDER_TTL_HOURS` | `48` | Auto-cancel window for `PENDING_WA` orders |
 | `SESSION_TTL_DAYS` | `30` | Session and cookie lifetime |
-| `AUTH_RATE_LIMIT_PER_MIN` | `10` | Bucket size and refill per minute, per (endpoint, IP) |
+| `AUTH_RATE_LIMIT_PER_MIN` | `10` | Bucket size and refill per minute, per (endpoint, client subject) (§5.3.4) |
+| `ORDER_RATE_LIMIT_PER_MIN` | `10` | Checkout bucket size and refill per minute, per parent (§5.3.4). `≤ 0` disables it |
+| `MAX_PENDING_ORDERS_PER_PARENT` | `3` | Most `PENDING_WA` orders one parent may hold before checkout answers `409 too_many_pending_orders` (§5.9.1). `0` disables the cap; a negative value falls back to the default |
 | `COOKIE_SECURE` | `auto` | `true`, `false` or `auto`. `auto` adds `Secure` when `PUBLIC_BASE_URL` starts with `https://` or the request has `X-Forwarded-Proto: https` |
 | `SWEEP_INTERVAL_SECONDS` | `300` | How often the sweep task runs |
 | `RUST_LOG` | `info` | tracing `EnvFilter` |
@@ -1241,10 +1263,12 @@ The catalog is seeded in **every** environment.
 | Condition | Result |
 |---|---|
 | `ADMIN_EMAIL` and `ADMIN_PASSWORD` are both set | Create the admin with `full_name "Admin RUMI"` and `phone_wa` = `RUMI_ADMIN_WA_PHONE` |
-| Otherwise, `SEED_DEMO=true` | Create `admin@rumi.id` with password `rumi-admin-123` |
+| Otherwise, `SEED_DEMO=true` and the demo guard allows it | Create `admin@rumi.id` with password `rumi-admin-123` |
 | Otherwise | Log a WARN: "no admin account" |
 
 **Demo data** (§5.11.4) is added only when `SEED_DEMO=true` and `nadia@example.com` does not exist yet.
+
+**Demo guard.** A deployment whose `PUBLIC_BASE_URL` starts with `https://` is treated as public. There, `SEED_DEMO=true` is **refused** — neither the demo admin (`admin@rumi.id`) nor the demo data is created, and an ERROR is logged — unless `ALLOW_DEMO_SEED_IN_PROD=true`. The catalog and the `ADMIN_EMAIL`/`ADMIN_PASSWORD` bootstrap are unaffected.
 
 #### 5.11.2 Classes and kits (catalog)
 
@@ -1475,3 +1499,13 @@ The SPA bundles its fonts (`@fontsource-variable/inter`) and the logo, so the CS
 19. **The Vite `/api` proxy must not use `changeOrigin`**, so that the Origin CSRF check passes in development.
 20. **The session expiry is fixed.** It does not slide. Reset-password does not sign the user in.
 21. **Child age is not checked against the class's age range at checkout.** This is listed as a non-goal; it can be added later as `409 age_out_of_range`.
+22. **Reset links carry the token in the fragment** (`/reset-password#token=…`). The fragment is never sent to the server, so the token cannot leak into nginx or app access logs or a `Referer`. The SPA still accepts `?token=` for links issued before the change and strips either form from the address bar with `history.replaceState`. Issuing a new link, and a successful reset, mark every other unused token of that user used.
+23. **`LogNotifier` hides the link outside development.** It logs the full reset URL only when `PUBLIC_BASE_URL` is empty or not `https://`; otherwise it logs a masked email (`n***@example.com`) and "reset requested". Real delivery is SMTP (rumi-0sw.10).
+24. **Rate-limit subjects.** IPv6 clients are bucketed by /64, because rotating addresses inside one /64 is free. Logins also have a per-email failure bucket (5 per 15 minutes, cleared on success), checked before the password so a slow, distributed guess still stops.
+25. **Checkout anti-hoarding.** A parent may hold at most `MAX_PENDING_ORDERS_PER_PARENT` (3) `PENDING_WA` orders; more gets `409 too_many_pending_orders`, a new code. Checkout also has a per-parent bucket (`ORDER_RATE_LIMIT_PER_MIN`, 10). The replay check stays first, so a lost response can always be recovered with `200`. The UI points the parent to *Pesanan* in the dashboard (`/parent/dashboard?tab=orders`).
+26. **Demo seed guard.** `SEED_DEMO=true` is refused on an `https://` `PUBLIC_BASE_URL` unless `ALLOW_DEMO_SEED_IN_PROD=true`, so a production box can never boot with the published demo passwords.
+27. **`image_url` rejects `//host` and backslashes**, closing protocol-relative and `/\host` tricks that the `/` prefix rule let through.
+28. **Class-only checkouts ignore `delivery.address` entirely** (no validation), matching "ignored and stored null".
+29. **Sweep resilience.** One order that fails to cancel is logged and skipped; the rest of the sweep still runs. Rate-limit buckets are evicted only once idle and full.
+30. **Attendance is a compare-and-set.** `PATCH /api/admin/enrollments/{id}` updates only if the status is still the one it read; if another request changed it meanwhile, the answer is `409 invalid_transition`.
+31. **The frontend checkout key follows the request.** The idempotency key is reused only while the request body (items, delivery and notes) is unchanged; editing the cart or the details starts a new key, so a replay can never silently drop an edit.

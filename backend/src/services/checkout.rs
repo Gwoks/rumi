@@ -1,10 +1,12 @@
 //! Checkout (PRD §5.9.1). The client sends only ids and quantities; the server
 //! owns every price, total, seat and stock number.
 //!
-//! Order of checks (first failure wins): auth (extractor) → idempotent replay →
-//! field validation (422) → child ownership (404) → one `BEGIN IMMEDIATE`
-//! transaction that reserves seats/stock with conditional UPDATEs, snapshots
-//! prices, allocates the order code and stores the WhatsApp message.
+//! Order of checks (first failure wins): auth (extractor) → per-parent rate
+//! limit (route) → idempotent replay → field validation (422) → child
+//! ownership (404) → one `BEGIN IMMEDIATE` transaction that re-checks the
+//! replay, enforces the `PENDING_WA` cap, reserves seats/stock with
+//! conditional UPDATEs, snapshots prices, allocates the order code and stores
+//! the WhatsApp message.
 //!
 //! `BEGIN IMMEDIATE` takes SQLite's write lock up front, so concurrent
 //! checkouts queue (busy_timeout) instead of interleaving; the conditional
@@ -147,7 +149,11 @@ pub fn parse(body: &Value) -> Result<CheckoutInput, ApiError> {
     };
     let delivery_name = read("name", Rule::Text { min: 2, max: 100 });
     let delivery_phone = read("phone_wa", Rule::Phone);
-    let address = delivery.as_ref().and_then(|d| d.opt_text("address", 500));
+    // A class-only order ignores the address entirely: it is never validated.
+    let address = delivery
+        .as_ref()
+        .filter(|_| has_kit)
+        .and_then(|d| d.opt_text("address", 500));
     if has_kit && address.is_none() {
         if let Some(d) = delivery.as_ref() {
             d.error("address", "Alamat wajib diisi untuk pesanan kit.");
@@ -160,7 +166,7 @@ pub fn parse(body: &Value) -> Result<CheckoutInput, ApiError> {
         items,
         delivery_name,
         delivery_phone,
-        delivery_address: if has_kit { address } else { None },
+        delivery_address: address,
         notes,
     })
 }
@@ -359,6 +365,28 @@ async fn existing_order_id(
         .await
 }
 
+/// §5.9.1 step 5: refuse a new order while the parent already holds
+/// `max_pending` orders in `PENDING_WA` (`0` disables the cap).
+async fn ensure_pending_capacity(
+    conn: &mut SqliteConnection,
+    parent_id: i64,
+    max_pending: i64,
+) -> Result<(), ApiError> {
+    if max_pending <= 0 {
+        return Ok(());
+    }
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM orders WHERE parent_id = ? AND status = 'PENDING_WA'",
+    )
+    .bind(parent_id)
+    .fetch_one(conn)
+    .await?;
+    if pending >= max_pending {
+        return Err(ApiError::too_many_pending_orders(pending));
+    }
+    Ok(())
+}
+
 async fn insert_order(
     conn: &mut SqliteConnection,
     parent: &User,
@@ -405,7 +433,8 @@ async fn load(pool: &SqlitePool, cfg: &Config, id: i64) -> Result<Order, ApiErro
 }
 
 /// Steps 4–6. Step 2 (replay) is repeated inside the transaction so two
-/// concurrent submits with one key resolve to the same order.
+/// concurrent submits with one key resolve to the same order, and it runs
+/// before the pending cap so a replay always answers `200`.
 pub async fn checkout(
     pool: &SqlitePool,
     cfg: &Config,
@@ -418,6 +447,7 @@ pub async fn checkout(
         drop(tx);
         return Ok(Outcome::Replayed(load(pool, cfg, id).await?));
     }
+    ensure_pending_capacity(&mut tx, parent.id, cfg.max_pending_orders_per_parent).await?;
     let lines = reserve_all(&mut tx, &input.items, &names).await?;
     let order_id = match insert_order(&mut tx, parent, input, &lines).await {
         Ok(id) => id,

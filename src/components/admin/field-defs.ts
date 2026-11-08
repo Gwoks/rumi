@@ -118,8 +118,11 @@ function parseText(field: FieldDef, raw: string): ParseResult {
   if (field.maxLength !== undefined && length > field.maxLength) {
     return fail(t('common.validation.maxChars', { n: field.maxLength }))
   }
-  // PRD §5.8.6: `https://…` or a same-origin path (never protocol-relative `//host`).
-  const isUrlOk = value.startsWith('https://') || (value.startsWith('/') && !value.startsWith('//'))
+  // PRD §5.8.6: `https://…` or a same-origin path — never protocol-relative
+  // `//host`, and never a backslash (browsers read `/\host` as `//host`).
+  const isUrlOk =
+    (value.startsWith('https://') || (value.startsWith('/') && !value.startsWith('//'))) &&
+    !value.includes('\\')
   if (field.type === 'url' && !isUrlOk) return fail(t('admin.validation.url'))
   return ok(value)
 }

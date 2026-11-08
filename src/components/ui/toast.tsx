@@ -2,7 +2,9 @@
  * Toast (DESIGN.md "Toast"): Radix Toast re-themed — a dark pill at the bottom
  * center. `useToast().toast(message, 'success' | 'error')` from anywhere under
  * <ToastProvider> (mounted in components/providers.tsx, above the router, so a
- * toast survives navigation).
+ * toast survives navigation). `dismissAll()` clears stale toasts when a view
+ * takes over (Radix pauses the timer while the window is blurred, e.g. after
+ * WhatsApp opens in a new tab).
  */
 import * as ToastPrimitive from '@radix-ui/react-toast'
 import { AlertCircle, Check } from 'lucide-react'
@@ -27,9 +29,10 @@ interface ToastItem {
 
 export interface ToastApi {
   toast: (message: string, variant?: ToastVariant) => void
+  dismissAll: () => void
 }
 
-const ToastContext = createContext<ToastApi>({ toast: () => {} })
+const ToastContext = createContext<ToastApi>({ toast: () => {}, dismissAll: () => {} })
 
 export function useToast(): ToastApi {
   return useContext(ToastContext)
@@ -50,7 +53,9 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     setItems((prev) => prev.filter((item) => item.id !== id))
   }, [])
 
-  const value = useMemo(() => ({ toast }), [toast])
+  const dismissAll = useCallback(() => setItems([]), [])
+
+  const value = useMemo(() => ({ toast, dismissAll }), [toast, dismissAll])
 
   return (
     <ToastContext.Provider value={value}>

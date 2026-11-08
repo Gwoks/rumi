@@ -28,6 +28,8 @@ Restart=always
 RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
+# Files the service creates (the SQLite DB, its -wal/-shm) are owner-only.
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

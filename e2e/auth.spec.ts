@@ -145,9 +145,25 @@ test.describe('password reset', () => {
     expect(call?.body).toEqual({ email: 'tidak.ada@example.com' })
   })
 
-  test('reset-password sets a new password and points to login', async ({ page }) => {
+  test('reset-password reads the #token fragment, hides it and sets a new password', async ({
+    page,
+  }) => {
+    const mock = await installMockBackend(page)
+    await page.goto(`/reset-password#token=${RESET_TOKEN}`)
+    // The token is scrubbed from the address bar as soon as it is read.
+    await expect(page).toHaveURL('/reset-password')
+    await page.getByLabel('Kata sandi baru').fill('kata-sandi-baru')
+    await page.getByLabel('Ulangi kata sandi').fill('kata-sandi-baru')
+    await page.getByRole('button', { name: 'Simpan kata sandi baru' }).click()
+    await expect(page.getByRole('heading', { name: 'Kata sandi berhasil diubah' })).toBeVisible()
+    const call = mock.calls.find((c) => c.path === '/api/auth/reset-password')
+    expect(call?.body).toEqual({ token: RESET_TOKEN, password: 'kata-sandi-baru' })
+  })
+
+  test('a legacy ?token= link still works and is scrubbed too', async ({ page }) => {
     await installMockBackend(page)
     await page.goto(`/reset-password?token=${RESET_TOKEN}`)
+    await expect(page).toHaveURL('/reset-password')
     await page.getByLabel('Kata sandi baru').fill('kata-sandi-baru')
     await page.getByLabel('Ulangi kata sandi').fill('beda-sandi-123')
     await page.getByRole('button', { name: 'Simpan kata sandi baru' }).click()
@@ -161,7 +177,7 @@ test.describe('password reset', () => {
 
   test('an invalid or missing token offers a new link', async ({ page }) => {
     await installMockBackend(page)
-    await page.goto('/reset-password?token=kedaluwarsa')
+    await page.goto('/reset-password#token=kedaluwarsa')
     await page.getByLabel('Kata sandi baru').fill('kata-sandi-baru')
     await page.getByLabel('Ulangi kata sandi').fill('kata-sandi-baru')
     await page.getByRole('button', { name: 'Simpan kata sandi baru' }).click()

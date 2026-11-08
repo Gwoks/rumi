@@ -3,20 +3,29 @@
  * 2 Detail (a child per class line + delivery) → 3 Konfirmasi → "Pesan via
  * WhatsApp" → POST /api/orders with ids and quantities only.
  *
- * The idempotency key is stable per checkout ATTEMPT: it is created on the
- * first submit and reused on every retry (also across closing and reopening
- * the dialog) until an order succeeds, so a lost response can never create a
- * second order — the server replays the first one (§5.9.1 step 2).
+ * The idempotency key is stable per REQUEST: it is created on the first submit
+ * and reused on every retry of the same body (also across closing and
+ * reopening the dialog), so a lost response can never create a second order —
+ * the server replays the first one (§5.9.1 step 2). Once the cart, the
+ * delivery or the notes change, a new key is used, because a replay would
+ * return the old order and silently drop the edit (§6.31).
  */
 import { useCallback, useRef, useState } from 'react'
 import { ShoppingBag } from 'lucide-react'
+import { Link } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogFooter, DialogHeader } from '@/components/ui/dialog'
 import { EmptyState } from '@/components/ui/empty-state'
 import { InlineAlert } from '@/components/ui/inline-alert'
 import { Stepper } from '@/components/ui/stepper'
 import { t, type CopyKey } from '@/lib/copy'
-import { newIdempotencyKey, type CheckoutErrorView, type CheckoutRecovery } from './checkout-model'
+import { PARENT_ORDERS_PATH } from '@/lib/navigation'
+import {
+  nextAttempt,
+  type CheckoutAttempt,
+  type CheckoutErrorView,
+  type CheckoutRecovery,
+} from './checkout-model'
 import { ConfirmStep, DetailsStep, SummaryStep } from './checkout-steps'
 import { CheckoutSuccess } from './checkout-success'
 import {
@@ -37,6 +46,7 @@ const STEPS = [
 const RECOVERY_LABEL: Record<CheckoutRecovery, CopyKey> = {
   cart: 'public.checkout.editCart',
   details: 'public.checkout.error.editDetails',
+  orders: 'public.checkout.error.viewOrders',
   retry: 'common.retry',
 }
 
@@ -48,15 +58,16 @@ export interface CheckoutDialogProps {
 }
 
 export function CheckoutDialog({ open, onOpenChange, onEditCart }: CheckoutDialogProps) {
-  const keyRef = useRef<string | null>(null)
+  const attemptRef = useRef<CheckoutAttempt | null>(null)
   const [isBusy, setBusy] = useState(false)
 
-  const takeKey = useCallback((): string => {
-    if (!keyRef.current) keyRef.current = newIdempotencyKey()
-    return keyRef.current
+  const takeKey = useCallback((fingerprint: string): string => {
+    const attempt = nextAttempt(attemptRef.current, fingerprint)
+    attemptRef.current = attempt
+    return attempt.key
   }, [])
   const releaseKey = useCallback(() => {
-    keyRef.current = null
+    attemptRef.current = null
   }, [])
 
   return (
@@ -80,6 +91,30 @@ export function CheckoutDialog({ open, onOpenChange, onEditCart }: CheckoutDialo
   )
 }
 
+function RecoveryAction({
+  recovery,
+  onRecover,
+}: {
+  recovery: CheckoutRecovery
+  onRecover: (recovery: CheckoutRecovery) => void
+}) {
+  const label = t(RECOVERY_LABEL[recovery])
+  if (recovery === 'orders') {
+    return (
+      <Button asChild variant="secondary" size="sm">
+        <Link to={PARENT_ORDERS_PATH} onClick={() => onRecover(recovery)}>
+          {label}
+        </Link>
+      </Button>
+    )
+  }
+  return (
+    <Button variant="secondary" size="sm" onClick={() => onRecover(recovery)}>
+      {label}
+    </Button>
+  )
+}
+
 function ErrorAlert({
   error,
   onRecover,
@@ -92,11 +127,7 @@ function ErrorAlert({
       variant="danger"
       title={error.title}
       className="mb-5"
-      action={
-        <Button variant="secondary" size="sm" onClick={() => onRecover(error.recovery)}>
-          {t(RECOVERY_LABEL[error.recovery])}
-        </Button>
-      }
+      action={<RecoveryAction recovery={error.recovery} onRecover={onRecover} />}
     >
       <p>{error.message}</p>
       <p className="mt-1">{error.hint}</p>
@@ -195,6 +226,7 @@ function CheckoutFlowView({ onEditCart, ...options }: CheckoutFlowViewProps) {
   const recover = (recovery: CheckoutRecovery) => {
     if (recovery === 'cart') onEditCart()
     else if (recovery === 'details') flow.setStep(DETAILS_STEP)
+    else if (recovery === 'orders') options.onClose()
     else void flow.submit()
   }
 

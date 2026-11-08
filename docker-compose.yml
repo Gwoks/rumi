@@ -34,17 +34,27 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       RUMI_ADMIN_WA_PHONE: ${RUMI_ADMIN_WA_PHONE:-6281234567890}
       # Demo accounts + data (§5.11.4). Local only; never on a reachable host.
+      # Refused when PUBLIC_BASE_URL is https:// unless ALLOW_DEMO_SEED_IN_PROD
+      # is true (§5.11.1) — only for a deliberately public demo.
       SEED_DEMO: ${SEED_DEMO:-false}
+      ALLOW_DEMO_SEED_IN_PROD: ${ALLOW_DEMO_SEED_IN_PROD:-false}
       # --- business rules / housekeeping --------------------------------------
       PENDING_ORDER_TTL_HOURS: ${PENDING_ORDER_TTL_HOURS:-48}
       SESSION_TTL_DAYS: ${SESSION_TTL_DAYS:-30}
       AUTH_RATE_LIMIT_PER_MIN: ${AUTH_RATE_LIMIT_PER_MIN:-10}
+      ORDER_RATE_LIMIT_PER_MIN: ${ORDER_RATE_LIMIT_PER_MIN:-10}
+      MAX_PENDING_ORDERS_PER_PARENT: ${MAX_PENDING_ORDERS_PER_PARENT:-3}
       SWEEP_INTERVAL_SECONDS: ${SWEEP_INTERVAL_SECONDS:-300}
       RUST_LOG: ${RUST_LOG:-info}
     ports:
       # host:container — the container always listens on 8080 (see the note
       # above); change the host side to relocate the published port.
-      - "${APP_PORT:-8080}:8080"
+      # Published on the host's LOOPBACK only by default, so the app is
+      # reachable through a reverse proxy on the same host (nginx, Caddy) but
+      # not directly from the network. To expose it on every interface (a LAN
+      # demo with no proxy), drop the "127.0.0.1:" prefix:
+      #   - "${APP_PORT:-8080}:8080"
+      - "127.0.0.1:${APP_PORT:-8080}:8080"
     volumes:
       - rumi_data:/app/data
     restart: unless-stopped

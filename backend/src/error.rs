@@ -152,6 +152,17 @@ impl ApiError {
         )
     }
 
+    /// §5.9.1 step 5: the parent already holds `pending` `PENDING_WA` orders.
+    pub fn too_many_pending_orders(pending: i64) -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "too_many_pending_orders",
+            format!(
+                "Anda masih memiliki {pending} pesanan yang menunggu konfirmasi. Selesaikan atau tunggu konfirmasi pesanan tersebut sebelum membuat pesanan baru."
+            ),
+        )
+    }
+
     pub fn invalid_transition(from: &str, to: &str) -> Self {
         Self::invalid_transition_msg(format!("Status tidak dapat diubah dari {from} ke {to}."))
     }
@@ -393,6 +404,10 @@ mod tests {
             "Status tidak dapat diubah dari CANCELLED ke PAID."
         );
         assert_eq!(ApiError::class_full("Bulan").code, "class_full");
+        let capped = ApiError::too_many_pending_orders(3);
+        assert_eq!(capped.status, StatusCode::CONFLICT);
+        assert_eq!(capped.code, "too_many_pending_orders");
+        assert!(capped.message.starts_with("Anda masih memiliki 3 pesanan"));
         assert_eq!(
             ApiError::already_enrolled("Amina", "Bulan").code,
             "already_enrolled"

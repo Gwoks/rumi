@@ -1,4 +1,4 @@
-import { act, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -16,17 +16,24 @@ import {
   makeOrder,
   makeUser,
 } from '@/test/factories'
+import { useToast } from '@/components/ui/toast'
 import { renderWithRouter } from '@/test/render'
 import { CheckoutDialog } from './checkout-dialog'
 
 const WA_URL = 'https://wa.me/6281234567890?text=RUMI-2026-0007%20Total%3A%20Rp%20570.000'
 
+const CART_TOAST = 'Nampan Tangan Kecil ×2 masuk keranjang.'
+
 function Harness({ onEditCart = () => {} }: { onEditCart?: () => void }) {
   const [open, setOpen] = useState(true)
+  const { toast } = useToast()
   return (
     <>
       <button type="button" onClick={() => setOpen(true)}>
         buka
+      </button>
+      <button type="button" onClick={() => toast(CART_TOAST)}>
+        toast keranjang
       </button>
       <CheckoutDialog open={open} onOpenChange={setOpen} onEditCart={onEditCart} />
     </>
@@ -145,6 +152,63 @@ describe('CheckoutDialog', () => {
     expect(checkoutBody(checkout, 2).idempotency_key).not.toBe(
       checkoutBody(checkout, 0).idempotency_key,
     )
+  })
+
+  it('starts a new idempotency key when the order changed after a failed attempt', async () => {
+    const checkout = vi
+      .spyOn(api, 'checkout')
+      .mockRejectedValueOnce(new ApiError('network_error', 'x', 0))
+      .mockResolvedValue(makeCheckoutResult(makeOrder({ wa_url: WA_URL })))
+    const user = setup()
+    await goToConfirm(user)
+    await user.click(screen.getByRole('button', { name: 'Pesan via WhatsApp' }))
+    await screen.findByRole('alert')
+
+    // Back to the details, change the address, confirm again.
+    await user.click(screen.getByRole('button', { name: 'Kembali' }))
+    const address = await screen.findByLabelText(/Alamat pengiriman/)
+    await user.clear(address)
+    await user.type(address, 'Jl. Damai 1')
+    await user.click(screen.getByRole('button', { name: 'Lanjut' }))
+    await user.click(await screen.findByRole('button', { name: 'Pesan via WhatsApp' }))
+    await waitFor(() => expect(checkout).toHaveBeenCalledTimes(2))
+    expect(checkoutBody(checkout, 1).delivery.address).toBe('Jl. Damai 1')
+    expect(checkoutBody(checkout, 1).idempotency_key).not.toBe(
+      checkoutBody(checkout, 0).idempotency_key,
+    )
+  })
+
+  it('points to the orders tab when too many orders are pending', async () => {
+    vi.spyOn(api, 'checkout').mockRejectedValue(
+      new ApiError(
+        'too_many_pending_orders',
+        'Anda masih memiliki 3 pesanan yang menunggu konfirmasi.',
+        409,
+      ),
+    )
+    const user = setup()
+    await goToConfirm(user)
+    await user.click(screen.getByRole('button', { name: 'Pesan via WhatsApp' }))
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Masih ada pesanan yang menunggu')
+    expect(alert).toHaveTextContent('Anda masih memiliki 3 pesanan')
+    const link = within(alert).getByRole('link', { name: 'Lihat pesanan saya' })
+    expect(link).toHaveAttribute('href', '/parent/dashboard?tab=orders')
+    await user.click(link)
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(cartStore.getSnapshot().items).toHaveLength(2)
+  })
+
+  it('clears stale toasts once the order is placed', async () => {
+    vi.spyOn(api, 'checkout').mockResolvedValue(makeCheckoutResult(makeOrder({ wa_url: WA_URL })))
+    const user = setup()
+    // The modal makes the page inert, so fire the click directly.
+    fireEvent.click(screen.getByRole('button', { name: 'toast keranjang', hidden: true }))
+    expect((await screen.findAllByText(CART_TOAST)).length).toBeGreaterThan(0)
+    await goToConfirm(user)
+    await user.click(screen.getByRole('button', { name: 'Pesan via WhatsApp' }))
+    await screen.findByText('RUMI-2026-0001')
+    await waitFor(() => expect(screen.queryByText(CART_TOAST)).toBeNull())
   })
 
   it('maps out_of_stock to a cart fix with the server message', async () => {

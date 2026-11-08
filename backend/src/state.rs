@@ -17,9 +17,10 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Production wiring: the `LogNotifier`.
+    /// Production wiring: the `LogNotifier`, revealing links only in development.
     pub fn new(pool: SqlitePool, cfg: Config) -> Self {
-        Self::with_notifier(pool, cfg, Arc::new(LogNotifier))
+        let notifier = Arc::new(LogNotifier::for_config(&cfg));
+        Self::with_notifier(pool, cfg, notifier)
     }
 
     pub fn with_notifier(pool: SqlitePool, cfg: Config, notifier: Arc<dyn Notifier>) -> Self {

@@ -83,7 +83,8 @@ export const adminCopy = {
   'admin.validation.min': 'Minimal {n}.',
   'admin.validation.max': 'Maksimal {n}.',
   'admin.validation.time': 'Masukkan jam dengan format JJ:MM, misalnya 09:30.',
-  'admin.validation.url': 'Gunakan alamat yang diawali https:// atau / (misalnya /brand/foto.jpg).',
+  'admin.validation.url':
+    'Gunakan alamat yang diawali https:// atau satu / (misalnya /brand/foto.jpg), tanpa // di awal dan tanpa \\.',
   'admin.validation.json': 'Format JSON tidak valid.',
   'admin.validation.jsonObject': 'Isi harus berupa objek JSON.',
   'admin.validation.option': 'Pilih salah satu opsi.',

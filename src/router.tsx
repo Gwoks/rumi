@@ -4,12 +4,14 @@
  *  - public + auth + /design-kit + 404 render inside <PublicLayout>
  *  - dashboards and the report are guarded by <RequireRole>
  *  - dashboards, the report and /design-kit are code-split via route `lazy`
- *    so the public bundle stays small (Vite 500 kB chunk budget)
+ *    so the public bundle stays small (Vite 500 kB chunk budget); each lazy
+ *    route shows <RouteFallback> while its module loads on a hard page load
  */
 import { createBrowserRouter, Navigate, type RouteObject } from 'react-router-dom'
 import { AppRoot } from '@/components/rumi/app-root'
 import { PublicLayout } from '@/components/rumi/public-layout'
 import { RequireRole } from '@/components/rumi/require-role'
+import { RouteFallback } from '@/components/rumi/route-fallback'
 import { ROUTES } from '@/lib/navigation'
 import { ForgotPasswordScreen } from '@/screens/auth/forgot-password'
 import { LoginScreen } from '@/screens/auth/login'
@@ -29,8 +31,9 @@ function lazyScreen<M>(
   load: () => Promise<M>,
   pick: (mod: M) => React.ComponentType,
   role?: Role,
-): Pick<RouteObject, 'lazy'> {
+): Pick<RouteObject, 'lazy' | 'hydrateFallbackElement'> {
   return {
+    hydrateFallbackElement: <RouteFallback />,
     lazy: async () => {
       const Screen = pick(await load())
       return {

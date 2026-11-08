@@ -2,8 +2,9 @@
  * Assessment logger (POST /api/admin/assessments, PRD §5.8.5 AssessmentCreate):
  * domain, level 1–4 with its rubric label, milestone 1–200, notes ≤ 1000,
  * observed_on ≤ today (WIB) and an optional class from the child's
- * enrollments. Client rules mirror the server; server `fields` errors land
- * next to their control.
+ * CONFIRMED/ATTENDED enrollments held today or earlier
+ * (`assessmentClassOptions`). Client rules mirror the server; server `fields`
+ * errors land next to their control.
  */
 import { ClipboardCheck } from 'lucide-react'
 import { useState } from 'react'
@@ -19,8 +20,9 @@ import { useToast } from '@/components/ui/toast'
 import { apiErrorMessage, apiFieldErrors } from '@/lib/api-errors'
 import { t } from '@/lib/copy'
 import { domainMeta, LEVELS } from '@/lib/domains'
-import { formatDate, parseDateStr, todayWib } from '@/lib/format'
+import { parseDateStr, todayWib } from '@/lib/format'
 import { optionalText, requiredText, validateForm, type FormErrors } from '@/lib/validation'
+import { assessmentClassOptions } from './assessment-class-options'
 
 const LEVEL_VALUES = LEVELS.map((l) => String(l.level))
 const DOMAIN_SET: ReadonlySet<string> = new Set(DOMAIN_VALUES)
@@ -61,24 +63,6 @@ const emptyValues = (): FormValues => ({
   observed_on: todayWib(),
   class_id: '',
 })
-
-/** Distinct classes from the child's enrollments (newest first, as listed). */
-function classOptions(detail: StudentDetail) {
-  const seen = new Set<number>()
-  return detail.enrollments.flatMap((e) => {
-    if (seen.has(e.class_id)) return []
-    seen.add(e.class_id)
-    return [
-      {
-        value: String(e.class_id),
-        label: t('admin.assessment.classOption', {
-          title: e.class_title,
-          date: formatDate(e.class_date),
-        }),
-      },
-    ]
-  })
-}
 
 export interface AssessmentFormProps {
   detail: StudentDetail
@@ -210,7 +194,7 @@ export function AssessmentForm({ detail, onSaved }: AssessmentFormProps) {
                   onChange={(e) => setValue('class_id', e.target.value)}
                 >
                   <option value="">{t('admin.assessment.noClass')}</option>
-                  {classOptions(detail).map((o) => (
+                  {assessmentClassOptions(detail.enrollments).map((o) => (
                     <option key={o.value} value={o.value}>
                       {o.label}
                     </option>

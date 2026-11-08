@@ -38,7 +38,12 @@ import {
   type MockState,
 } from './support/mock-store'
 
-export { ADMIN_PASSWORD, PARENT_PASSWORD, RESET_TOKEN } from './support/mock-store'
+export {
+  ADMIN_PASSWORD,
+  MAX_PENDING_ORDERS,
+  PARENT_PASSWORD,
+  RESET_TOKEN,
+} from './support/mock-store'
 
 export interface MockFailure {
   status: number

@@ -40,6 +40,8 @@ import { formatDateLong, formatRupiah } from '../../src/lib/format'
 export const PARENT_PASSWORD = 'rumi-parent-123'
 export const ADMIN_PASSWORD = 'rumi-admin-123'
 export const RESET_TOKEN = 'valid-reset-token'
+/** `MAX_PENDING_ORDERS_PER_PARENT` default (PRD §5.9.1 step 5, §5.10). */
+export const MAX_PENDING_ORDERS = 3
 
 export interface Account {
   user: User
@@ -226,6 +228,17 @@ export function checkout(state: MockState, user: User, body: CheckoutBody): [201
   const replayKey = `${user.id}:${body.idempotency_key.toLowerCase()}`
   const replay = state.orders.find((o) => o.id === state.idempotency[replayKey])
   if (replay) return [200, replay]
+  // The replay is answered first; only then the PENDING_WA cap (§5.9.1 step 5).
+  const pending = state.orders.filter(
+    (o) => o.parent_id === user.id && o.status === 'PENDING_WA',
+  ).length
+  if (pending >= MAX_PENDING_ORDERS) {
+    throw new MockError(
+      409,
+      'too_many_pending_orders',
+      `Anda masih memiliki ${pending} pesanan yang menunggu konfirmasi. Selesaikan atau tunggu konfirmasi pesanan tersebut sebelum membuat pesanan baru.`,
+    )
+  }
   const items = itemsFor(state, body)
   for (const item of items) {
     if (item.kit_id !== null) adjustStock(state, item.kit_id, -item.quantity)

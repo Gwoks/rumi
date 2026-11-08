@@ -8,6 +8,7 @@ import {
   clearAuth,
   login,
   logout,
+  refreshAuth,
   register,
 } from './auth-store'
 import { api } from './client'
@@ -89,6 +90,24 @@ describe('auth store', () => {
     expect(authStore.getSnapshot().status).toBe('ready')
     await vi.waitFor(() => expect(authStore.getSnapshot().user).toBeNull())
     expect(me).toHaveBeenCalledOnce()
+  })
+
+  it('keeps a ready session when a cross-tab re-check fails transiently', async () => {
+    const user = makeUser()
+    authStore.setState({ user, status: 'ready', error: null })
+    const me = vi.spyOn(api, 'me').mockRejectedValue(new ApiError('network_error', 'offline', 0))
+    window.dispatchEvent(new StorageEvent('storage', { key: AUTH_SIGNAL_KEY, newValue: '3' }))
+    await vi.waitFor(() => expect(me).toHaveBeenCalledOnce())
+    await Promise.resolve()
+    expect(authStore.getSnapshot()).toEqual({ user, status: 'ready', error: null })
+  })
+
+  it('still reports a failed re-check while not yet ready', async () => {
+    authStore.setState({ user: null, status: 'error', error: null })
+    vi.spyOn(api, 'me').mockRejectedValue(new ApiError('internal', 'boom', 500))
+    await refreshAuth()
+    expect(authStore.getSnapshot().status).toBe('error')
+    expect(authStore.getSnapshot().error?.code).toBe('internal')
   })
 
   it('survives a throwing localStorage when signalling', async () => {

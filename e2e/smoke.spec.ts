@@ -6,6 +6,15 @@
 import { expect, test, type Page } from '@playwright/test'
 import { installMockBackend } from './mock-backend'
 
+/** Console warnings, e.g. React Router's missing-HydrateFallback notice. */
+function trackConsoleWarnings(page: Page): string[] {
+  const warnings: string[] = []
+  page.on('console', (msg) => {
+    if (msg.type() === 'warning') warnings.push(msg.text())
+  })
+  return warnings
+}
+
 function trackConsoleErrors(page: Page): string[] {
   const errors: string[] = []
   page.on('console', (msg) => {
@@ -138,6 +147,16 @@ test.describe('RequireRole', () => {
     await installMockBackend(page)
     await page.goto('/parent/dashboard?tab=orders')
     await expect(page).toHaveURL('/login?next=%2Fparent%2Fdashboard%3Ftab%3Dorders')
+  })
+
+  test('hard-loading a code-split route renders without a HydrateFallback warning', async ({
+    page,
+  }) => {
+    const warnings = trackConsoleWarnings(page)
+    await installMockBackend(page, { as: 'PARENT' })
+    await page.goto('/parent/dashboard')
+    await expect(page.getByRole('heading', { level: 1 })).toContainText('Nadia Rahman')
+    expect(warnings.filter((w) => w.includes('HydrateFallback'))).toEqual([])
   })
 
   test('a parent is bounced off the admin dashboard', async ({ page }) => {

@@ -23,13 +23,20 @@ pub struct SweepReport {
     pub buckets_evicted: usize,
 }
 
-/// Run one sweep pass.
+/// Run one sweep pass. A failure in step 1 is logged and never skips the
+/// purges that follow (§5.9.6).
 pub async fn sweep_once(
     pool: &SqlitePool,
     cfg: &Config,
     limiter: &Limiter,
 ) -> Result<SweepReport, ApiError> {
-    let orders_cancelled = cancel_expired(pool, cfg.pending_order_ttl_hours).await?;
+    let orders_cancelled = match cancel_expired(pool, cfg.pending_order_ttl_hours).await {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::error!(error = %e, "sweep: listing expired orders failed (continuing)");
+            0
+        }
+    };
     let sessions_purged =
         sqlx::query("DELETE FROM auth_sessions WHERE expires_at <= datetime('now')")
             .execute(pool)
@@ -206,6 +213,58 @@ mod tests {
             sweep_once(&pool, &cfg, &limiter).await.unwrap(),
             SweepReport::default()
         );
+    }
+
+    #[tokio::test]
+    async fn one_failing_cancel_is_skipped_and_the_sweep_finishes() {
+        let pool = fixture().await;
+        pending_order(&pool, 1, "-50 hours", 1, 1).await;
+        pending_order(&pool, 2, "-49 hours", 2, 1).await;
+        tokens(&pool).await;
+        // Order 1 cannot be cancelled (e.g. a corrupt row); order 2 can.
+        exec(
+            &pool,
+            "CREATE TRIGGER block_order_1 BEFORE UPDATE OF status ON orders
+             WHEN NEW.id = 1 BEGIN SELECT RAISE(ABORT, 'boom'); END",
+        )
+        .await;
+        let cfg = crate::testutil::config();
+
+        let report = sweep_once(&pool, &cfg, &Limiter::new()).await.unwrap();
+        assert_eq!(report.orders_cancelled, 1);
+        assert_eq!(report.sessions_purged, 1);
+        assert_eq!(report.resets_purged, 2);
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT status = 'PENDING_WA' FROM orders WHERE id = 1"
+            )
+            .await,
+            1,
+            "the failed cancel rolled back"
+        );
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT status = 'CANCELLED' FROM orders WHERE id = 2"
+            )
+            .await,
+            1
+        );
+        assert_eq!(count(&pool, "SELECT stock FROM play_kits").await, 6);
+    }
+
+    #[tokio::test]
+    async fn a_failed_order_listing_still_purges_sessions_and_tokens() {
+        let pool = fixture().await;
+        tokens(&pool).await;
+        exec(&pool, "ALTER TABLE orders RENAME TO orders_unavailable").await;
+        let report = sweep_once(&pool, &crate::testutil::config(), &Limiter::new())
+            .await
+            .unwrap();
+        assert_eq!(report.orders_cancelled, 0);
+        assert_eq!(report.sessions_purged, 1);
+        assert_eq!(report.resets_purged, 2);
     }
 
     #[tokio::test]

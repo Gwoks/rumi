@@ -1,13 +1,15 @@
 /**
  * State and actions of one checkout session (the dialog renders it): the
  * current step, the delivery form, the child picked per class line, the
- * submit with a stable idempotency key, and the error → recovery mapping.
+ * submit with an idempotency key that is stable per request body, and the
+ * error → recovery mapping. A successful order also clears stale toasts.
  */
 import { useRef, useState } from 'react'
 import { api } from '@/api/client'
 import { isApiError } from '@/api/errors'
 import type { CheckoutResult, Child } from '@/api/schemas'
 import { useAuth } from '@/api/use-auth'
+import { useToast } from '@/components/ui/toast'
 import { t } from '@/lib/copy'
 import { useAsync, type AsyncState } from '@/lib/use-async'
 import { focusFirstInvalid, useForm, type FormApi } from '@/lib/use-form'
@@ -17,6 +19,7 @@ import { useCart, type CartSnapshot } from '@/stores/use-cart'
 import {
   buildCheckoutBody,
   checkoutErrorView,
+  checkoutFingerprint,
   safeHttpsUrl,
   type CheckoutErrorView,
   type DeliveryData,
@@ -29,8 +32,8 @@ export const CONFIRM_STEP = 2
 
 export interface CheckoutFlowOptions {
   onClose: () => void
-  /** The key for this attempt (created on first use, reused on retries). */
-  takeKey: () => string
+  /** The key for this request body (reused while the body is unchanged). */
+  takeKey: (fingerprint: string) => string
   /** Forget the key once an order exists. */
   releaseKey: () => void
   onBusyChange: (busy: boolean) => void
@@ -76,6 +79,7 @@ export function useCheckoutFlow({
 }: CheckoutFlowOptions): CheckoutFlow {
   const cart = useCart()
   const { user } = useAuth()
+  const { dismissAll } = useToast()
   const [step, setStep] = useState(SUMMARY_STEP)
   const [delivery, setDelivery] = useState<DeliveryData | null>(null)
   const [childErrors, setChildErrors] = useState<Record<string, string>>({})
@@ -135,11 +139,12 @@ export function useCheckoutFlow({
   }
 
   const submit = async () => {
-    const body = delivery ? buildCheckoutBody(cart.items, delivery, takeKey()) : null
-    if (!body) {
+    const draft = delivery ? buildCheckoutBody(cart.items, delivery, '') : null
+    if (!draft) {
       setStep(DETAILS_STEP)
       return
     }
+    const body = { ...draft, idempotency_key: takeKey(checkoutFingerprint(draft)) }
     setSubmitting(true)
     onBusyChange(true)
     setError(null)
@@ -147,6 +152,7 @@ export function useCheckoutFlow({
       const created = await api.checkout(body)
       releaseKey()
       clearCart()
+      dismissAll()
       setResult(created)
       const waUrl = safeHttpsUrl(created.wa_url)
       if (waUrl) window.open(waUrl, '_blank', 'noopener,noreferrer')

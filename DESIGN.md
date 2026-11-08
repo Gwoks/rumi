@@ -3,7 +3,7 @@
 
 **Theme:** light only in v1 (no dark mode, YAGNI). The semantic layer keeps dark mode cheap to add later.
 **Source of truth:** the v0 template (`../rumi-v0-template/app/page.tsx`, `app/globals.css`, `app/design-kit/page.tsx`). The six brand colors below match it exactly.
-**UI language:** Bahasa Indonesia. Every string goes through `t()` in `src/lib/copy.ts`.
+**UI language:** Bahasa Indonesia. Every string goes through `t()` from `src/lib/copy/` (per-area files: `common.ts`, `public.ts`, `auth.ts`, `parent.ts`, `admin.ts`, `design-kit.ts`).
 
 **What RUMI should feel like.** RUMI should feel like a prepared Montessori room on a Saturday morning: unhurried, tidy, warm and quietly joyful.
 

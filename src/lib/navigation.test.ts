@@ -3,6 +3,7 @@ import {
   homeForRole,
   loginPathWithNext,
   parentReportPath,
+  PARENT_ORDERS_PATH,
   ROUTES,
   safeNextPath,
 } from './navigation'
@@ -15,6 +16,10 @@ describe('navigation helpers', () => {
 
   it('builds the report path', () => {
     expect(parentReportPath(42)).toBe('/parent/report/42')
+  })
+
+  it('links straight to the Pesanan tab', () => {
+    expect(PARENT_ORDERS_PATH).toBe('/parent/dashboard?tab=orders')
   })
 
   it('accepts only same-origin paths for ?next=', () => {

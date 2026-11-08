@@ -14,13 +14,14 @@ use axum::response::{IntoResponse, Response};
 
 use crate::config::Config;
 use crate::error::ApiError;
-use crate::extract::client_ip;
+use crate::extract::{client_ip, rate_limit_subject};
+use crate::limiter::Limiter;
 use crate::state::AppState;
 
 /// Maximum request body (§5.1).
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
-/// Rate-limit window for the auth buckets, in seconds (§5.3.4: "per minute").
-const RATE_WINDOW_SECS: i64 = 60;
+/// Rate-limit window for the per-minute buckets, in seconds (§5.3.4).
+pub const RATE_WINDOW_SECS: i64 = 60;
 
 pub fn is_api_path(path: &str) -> bool {
     path == "/api" || path.starts_with("/api/")
@@ -126,18 +127,32 @@ pub async fn api_guard(State(state): State<AppState>, req: Request, next: Next) 
     no_store(envelope_fallthrough(resp))
 }
 
-/// Per-(endpoint, client IP) token bucket for the auth endpoints (§5.3.4).
-/// Runs before body extraction, so every request takes a token.
-pub async fn auth_rate_limit(State(state): State<AppState>, req: Request, next: Next) -> Response {
-    let ip = client_ip(req.extensions(), req.headers());
-    let key = format!("auth:{}:{ip}", req.uri().path());
-    let result = state
-        .limiter
-        .check(&key, state.cfg.auth_rate_limit_per_min, RATE_WINDOW_SECS);
+/// Take one token from `key`'s bucket, or answer `429 rate_limited` with
+/// `Retry-After` when it is empty (§5.3.4).
+pub fn take_token(
+    limiter: &Limiter,
+    key: &str,
+    limit: i64,
+    window_secs: i64,
+) -> Result<(), ApiError> {
+    let result = limiter.check(key, limit, window_secs);
     if result.allowed {
-        next.run(req).await
+        Ok(())
     } else {
-        ApiError::rate_limited(result.retry_after).into_response()
+        Err(ApiError::rate_limited(result.retry_after))
+    }
+}
+
+/// Per-(endpoint, client subject) token bucket for the auth endpoints
+/// (§5.3.4). IPv6 clients share one bucket per /64. Runs before body
+/// extraction, so every request takes a token.
+pub async fn auth_rate_limit(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    let subject = rate_limit_subject(&client_ip(req.extensions(), req.headers()));
+    let key = format!("auth:{}:{subject}", req.uri().path());
+    let limit = state.cfg.auth_rate_limit_per_min;
+    match take_token(&state.limiter, &key, limit, RATE_WINDOW_SECS) {
+        Ok(()) => next.run(req).await,
+        Err(e) => e.into_response(),
     }
 }
 

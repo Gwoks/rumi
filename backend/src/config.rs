@@ -7,6 +7,10 @@ use crate::validate::normalize_phone;
 
 /// Default admin WhatsApp number used for `wa.me` links (§5.10).
 pub const DEFAULT_ADMIN_WA_PHONE: &str = "6281234567890";
+/// Default cap on a parent's `PENDING_WA` orders (§5.9.1, §5.10).
+pub const DEFAULT_MAX_PENDING_ORDERS: i64 = 3;
+/// Default per-parent checkout bucket, requests per minute (§5.3.4).
+pub const DEFAULT_ORDER_RATE_LIMIT_PER_MIN: i64 = 10;
 
 fn str_env(name: &str, fallback: &str) -> String {
     match std::env::var(name) {
@@ -63,11 +67,28 @@ pub struct Config {
     pub admin_email: String,
     pub admin_password: String,
     pub seed_demo: bool,
+    /// `ALLOW_DEMO_SEED_IN_PROD`: lets `SEED_DEMO` run on an `https://` base URL.
+    pub allow_demo_seed_in_prod: bool,
     pub pending_order_ttl_hours: i64,
     pub session_ttl_days: i64,
     pub auth_rate_limit_per_min: i64,
+    /// Per-parent `POST /api/orders` bucket (§5.3.4); `<= 0` disables it.
+    pub order_rate_limit_per_min: i64,
+    /// Most `PENDING_WA` orders per parent (§5.9.1); `0` disables the cap.
+    pub max_pending_orders_per_parent: i64,
     pub cookie_secure: CookieSecure,
     pub sweep_interval_seconds: u64,
+}
+
+/// `MAX_PENDING_ORDERS_PER_PARENT`: `0` disables the cap; a negative value
+/// falls back to the default (§5.10).
+fn max_pending_orders() -> i64 {
+    let raw = int_env("MAX_PENDING_ORDERS_PER_PARENT", DEFAULT_MAX_PENDING_ORDERS);
+    if raw < 0 {
+        tracing::warn!("MAX_PENDING_ORDERS_PER_PARENT is negative; using the default");
+        return DEFAULT_MAX_PENDING_ORDERS;
+    }
+    raw
 }
 
 impl Config {
@@ -91,9 +112,15 @@ impl Config {
             admin_email: str_env("ADMIN_EMAIL", "").trim().to_string(),
             admin_password: str_env("ADMIN_PASSWORD", ""),
             seed_demo: bool_env("SEED_DEMO", false),
+            allow_demo_seed_in_prod: bool_env("ALLOW_DEMO_SEED_IN_PROD", false),
             pending_order_ttl_hours: int_env("PENDING_ORDER_TTL_HOURS", 48).max(1),
             session_ttl_days: int_env("SESSION_TTL_DAYS", 30).max(1),
             auth_rate_limit_per_min: int_env("AUTH_RATE_LIMIT_PER_MIN", 10),
+            order_rate_limit_per_min: int_env(
+                "ORDER_RATE_LIMIT_PER_MIN",
+                DEFAULT_ORDER_RATE_LIMIT_PER_MIN,
+            ),
+            max_pending_orders_per_parent: max_pending_orders(),
             cookie_secure: CookieSecure::parse(&str_env("COOKIE_SECURE", "auto")),
             sweep_interval_seconds: u64::try_from(int_env("SWEEP_INTERVAL_SECONDS", 300))
                 .unwrap_or(300)
@@ -111,6 +138,19 @@ impl Config {
         }
     }
 
+    /// A public deployment: `PUBLIC_BASE_URL` starts with `https://`.
+    pub fn is_public_https(&self) -> bool {
+        self.public_base_url
+            .get(..8)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
+    }
+
+    /// §5.11.1 demo guard: `SEED_DEMO` runs unless this is a public `https://`
+    /// deployment without `ALLOW_DEMO_SEED_IN_PROD=true`.
+    pub fn demo_seed_allowed(&self) -> bool {
+        self.seed_demo && (!self.is_public_https() || self.allow_demo_seed_in_prod)
+    }
+
     /// Session lifetime in seconds (cookie `Max-Age`).
     pub fn session_ttl_seconds(&self) -> i64 {
         self.session_ttl_days * 86_400
@@ -121,7 +161,7 @@ impl Config {
 mod tests {
     use super::*;
 
-    const KEYS: [&str; 14] = [
+    const KEYS: [&str; 17] = [
         "APP_PORT",
         "APP_BIND_HOST",
         "DATABASE_PATH",
@@ -136,6 +176,9 @@ mod tests {
         "AUTH_RATE_LIMIT_PER_MIN",
         "COOKIE_SECURE",
         "SWEEP_INTERVAL_SECONDS",
+        "ALLOW_DEMO_SEED_IN_PROD",
+        "ORDER_RATE_LIMIT_PER_MIN",
+        "MAX_PENDING_ORDERS_PER_PARENT",
     ];
 
     fn clear() {
@@ -163,6 +206,53 @@ mod tests {
         assert_eq!(cfg.cookie_secure, CookieSecure::Auto);
         assert_eq!(cfg.sweep_interval_seconds, 300);
         assert_eq!(cfg.link_base(), "http://localhost:8080");
+        assert!(!cfg.allow_demo_seed_in_prod);
+        assert_eq!(cfg.order_rate_limit_per_min, 10);
+        assert_eq!(cfg.max_pending_orders_per_parent, 3);
+    }
+
+    #[test]
+    fn checkout_limits_and_demo_override_come_from_env() {
+        let _guard = crate::testutil::env_lock();
+        clear();
+        std::env::set_var("ALLOW_DEMO_SEED_IN_PROD", "true");
+        std::env::set_var("ORDER_RATE_LIMIT_PER_MIN", "4");
+        std::env::set_var("MAX_PENDING_ORDERS_PER_PARENT", "0");
+        let cfg = Config::from_env();
+        std::env::set_var("MAX_PENDING_ORDERS_PER_PARENT", "-2");
+        let negative = Config::from_env();
+        clear();
+        assert!(cfg.allow_demo_seed_in_prod);
+        assert_eq!(cfg.order_rate_limit_per_min, 4);
+        assert_eq!(cfg.max_pending_orders_per_parent, 0);
+        assert_eq!(negative.max_pending_orders_per_parent, 3);
+    }
+
+    fn with_base(base: &str, seed_demo: bool, allow_prod: bool) -> Config {
+        Config {
+            public_base_url: base.to_string(),
+            seed_demo,
+            allow_demo_seed_in_prod: allow_prod,
+            ..crate::testutil::config()
+        }
+    }
+
+    #[test]
+    fn public_https_deployments_are_detected() {
+        assert!(!with_base("", false, false).is_public_https());
+        assert!(!with_base("http://rumi.local", false, false).is_public_https());
+        assert!(with_base("https://rumi.id", false, false).is_public_https());
+        assert!(with_base("HTTPS://RUMI.ID", false, false).is_public_https());
+    }
+
+    #[test]
+    fn demo_seed_is_refused_on_https_unless_explicitly_allowed() {
+        assert!(!with_base("", false, false).demo_seed_allowed());
+        assert!(with_base("", true, false).demo_seed_allowed());
+        assert!(with_base("http://localhost:8080", true, false).demo_seed_allowed());
+        assert!(!with_base("https://rumi.id", true, false).demo_seed_allowed());
+        assert!(with_base("https://rumi.id", true, true).demo_seed_allowed());
+        assert!(!with_base("https://rumi.id", false, true).demo_seed_allowed());
     }
 
     #[test]

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   charLength,
+  childEditFormSchema,
   childFormSchema,
   deliveryFormSchema,
   forgotPasswordFormSchema,
@@ -110,6 +111,17 @@ describe('form schemas', () => {
     const invalid = childFormSchema.safeParse({ name: 'A', dob: '2020-02-30', notes: '' })
     expect(invalid.error?.issues[0].message).toBe('Masukkan tanggal yang valid.')
     expect(childFormSchema.safeParse({ name: 'A', dob: todayWib(), notes: '' }).success).toBe(true)
+  })
+
+  it('does not re-check the age rule for an unchanged dob when editing', () => {
+    const edit = childEditFormSchema('2010-01-01')
+    expect(edit.safeParse({ name: 'Kakak', dob: '2010-01-01', notes: '' }).success).toBe(true)
+    const older = edit.safeParse({ name: 'Kakak', dob: '2000-01-01', notes: '' })
+    expect(older.error?.issues[0].message).toBe('Usia anak maksimal 12 tahun.')
+    const future = edit.safeParse({ name: 'Kakak', dob: '2999-01-01', notes: '' })
+    expect(future.error?.issues[0].message).toBe('Tanggal lahir tidak boleh di masa depan.')
+    expect(edit.safeParse({ name: 'Kakak', dob: '2020-04-15', notes: '' }).success).toBe(true)
+    expect(edit.safeParse({ name: '', dob: '2010-01-01', notes: '' }).success).toBe(false)
   })
 
   it('requires the delivery address only with a kit', () => {

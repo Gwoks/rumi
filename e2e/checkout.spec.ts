@@ -5,7 +5,8 @@
  * success state shows the order code and a wa.me link with the Rp total.
  */
 import { expect, test, type Page } from '@playwright/test'
-import { installMockBackend, PARENT_PASSWORD } from './mock-backend'
+import { makeOrder } from '../src/test/factories'
+import { installMockBackend, MAX_PENDING_ORDERS, PARENT_PASSWORD } from './mock-backend'
 
 /** Record window.open instead of leaving the app for wa.me. */
 async function stubWindowOpen(page: Page) {
@@ -141,6 +142,46 @@ test('an out_of_stock rejection explains the problem and leads back to the cart'
   await expect(alert).toContainText('(tersisa 0)')
   await alert.getByRole('button', { name: 'Ubah keranjang' }).click()
   await expect(page.getByRole('dialog', { name: 'Keranjang' })).toBeVisible()
+})
+
+/** As a signed-in parent: add one kit and walk the dialog up to the submit. */
+async function checkoutOneKit(page: Page) {
+  await page.goto('/play-kits')
+  await page.getByRole('button', { name: 'Tambah Taman Berhitung ke keranjang' }).click()
+  await expect(page.getByText('Taman Berhitung ×1 masuk keranjang.').first()).toBeVisible()
+  await page.getByRole('button', { name: 'Lihat keranjang, 1 item' }).click()
+  await page.getByRole('button', { name: 'Lanjut ke Pembayaran' }).click()
+  const checkout = page.getByRole('dialog', { name: 'Selesaikan pesanan' })
+  await checkout.getByRole('button', { name: 'Lanjut' }).click()
+  await checkout.getByLabel(/Alamat pengiriman/).fill('Jl. Kemang Raya 12')
+  await checkout.getByRole('button', { name: 'Lanjut' }).click()
+  await checkout.getByRole('button', { name: 'Pesan via WhatsApp' }).click()
+  return checkout
+}
+
+test('a placed order clears the stale "masuk keranjang" toast', async ({ page }) => {
+  await installMockBackend(page, { as: 'PARENT' })
+  await checkoutOneKit(page)
+  const success = page.getByRole('dialog', { name: 'Pesanan dibuat' })
+  await expect(success.getByText('RUMI-2026-0001')).toBeVisible()
+  await expect(page.getByText('Taman Berhitung ×1 masuk keranjang.')).toHaveCount(0)
+})
+
+test('too many pending orders point the parent to the Pesanan tab', async ({ page }) => {
+  const pending = Array.from({ length: MAX_PENDING_ORDERS }, (_, i) =>
+    makeOrder({ id: 50 + i, order_code: `RUMI-2026-000${i + 1}` }),
+  )
+  const mock = await installMockBackend(page, { as: 'PARENT', orders: pending })
+  const checkout = await checkoutOneKit(page)
+  const alert = checkout.getByRole('alert')
+  await expect(alert).toContainText('Masih ada pesanan yang menunggu')
+  await expect(alert).toContainText(`Anda masih memiliki ${MAX_PENDING_ORDERS} pesanan`)
+  expect(mock.state.orders).toHaveLength(MAX_PENDING_ORDERS)
+  await alert.getByRole('link', { name: 'Lihat pesanan saya' }).click()
+  await expect(page).toHaveURL('/parent/dashboard?tab=orders')
+  await expect(page.getByRole('heading', { level: 2, name: 'Pesanan saya' })).toBeVisible()
+  // The cart is kept, so the parent can come back once an order is settled.
+  await expect(page.getByRole('button', { name: 'Lihat keranjang, 1 item' })).toBeVisible()
 })
 
 test('an admin cannot check out', async ({ page }) => {

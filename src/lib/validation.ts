@@ -122,6 +122,23 @@ export const childFormSchema = z.object({
   notes: optionalText(500),
 })
 
+/**
+ * Edit child (PATCH sends only changed fields, PRD §5.4.9): an unchanged dob
+ * is not re-validated, so a child who has since turned 13 can still be
+ * renamed. A changed dob gets the full `childDobField` rules.
+ */
+export function childEditFormSchema(originalDob: string) {
+  return childFormSchema.extend({
+    dob: z.string().superRefine((value, ctx) => {
+      if (value === originalDob) return
+      const parsed = childDobField.safeParse(value)
+      for (const issue of parsed.error?.issues ?? []) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: issue.message })
+      }
+    }),
+  })
+}
+
 /** Checkout delivery (PRD §5.8.4): the address is required iff the cart has a kit. */
 export function deliveryFormSchema(requiresAddress: boolean) {
   return z.object({

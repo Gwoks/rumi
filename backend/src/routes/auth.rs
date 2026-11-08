@@ -14,13 +14,23 @@ use crate::auth::OptionalUser;
 use crate::error::{created, ok, ApiError, ApiResult};
 use crate::extract::{client_ip, ApiJson};
 use crate::ids::{gen_token, hash_secret, TOKEN_BYTES};
-use crate::middleware::auth_rate_limit;
+use crate::middleware::{auth_rate_limit, take_token};
 use crate::models::child::{self, CHILD_SPECS};
 use crate::models::user::{self, NewUser, ROLE_PARENT};
 use crate::state::AppState;
 use crate::validate::{body_object, parse_create, Changes, Errors, Reader, Rule, PASSWORD};
 
 const RESET_TTL_MINUTES: i64 = 60;
+/// Login-failure bucket per normalized email (§5.3.4): 5 per 15 minutes.
+const LOGIN_FAILURE_LIMIT: i64 = 5;
+const LOGIN_FAILURE_WINDOW_SECS: i64 = 15 * 60;
+/// Marks every still-unused reset token of one user used (§5.8.3 #11, #12).
+const BURN_UNUSED_RESETS: &str =
+    "UPDATE password_resets SET used_at = datetime('now') WHERE user_id = ? AND used_at IS NULL";
+
+fn login_failure_key(email: &str) -> String {
+    format!("login-fail:{email}")
+}
 
 /// Rate-limited (§5.3.4) and public auth routes.
 pub fn router(state: AppState) -> Router<AppState> {
@@ -151,12 +161,22 @@ async fn login(
     let password = r.req_string("password", Rule::Secret { min: 1, max: 128 });
     errs.finish()?;
 
+    // Every attempt takes a token up front (so a parallel burst cannot slip
+    // past the check); a success clears the bucket, so only failures count.
+    let failure_key = login_failure_key(&email);
+    take_token(
+        &state.limiter,
+        &failure_key,
+        LOGIN_FAILURE_LIMIT,
+        LOGIN_FAILURE_WINDOW_SECS,
+    )?;
     let row = user::login_row(&state.pool, &email).await?;
     let user_id = row.as_ref().map(|(id, _)| *id);
     let verified = verify_async(row.map(|(_, h)| h), password).await?;
     let Some(user_id) = user_id.filter(|_| verified) else {
         return Err(ApiError::invalid_credentials());
     };
+    state.limiter.clear(&failure_key);
     if let Some(old) = session::session_token(&headers) {
         session::revoke(&state.pool, &old).await?;
     }
@@ -192,7 +212,30 @@ async fn me(OptionalUser(user): OptionalUser) -> ApiResult {
     ok(json!({ "user": user }))
 }
 
-/// #11: always `200 null`; a live account gets a 60-minute single-use link.
+/// A fresh 60-minute reset token for `user_id`; older unused ones are burned
+/// first so only the newest link works (§5.8.3 #11).
+async fn issue_reset_token(pool: &sqlx::SqlitePool, user_id: i64) -> Result<String, ApiError> {
+    let token = gen_token(TOKEN_BYTES);
+    let mut tx = crate::db::begin_immediate(pool).await?;
+    sqlx::query(BURN_UNUSED_RESETS)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO password_resets (user_id, token_hash, expires_at)
+         VALUES (?, ?, datetime('now', ?))",
+    )
+    .bind(user_id)
+    .bind(hash_secret(&token))
+    .bind(format!("+{RESET_TTL_MINUTES} minutes"))
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(token)
+}
+
+/// #11: always `200 null`; a live account gets a 60-minute single-use link
+/// whose token rides in the URL fragment (never sent to a server log).
 async fn forgot_password(
     State(state): State<AppState>,
     ApiJson(body): ApiJson<Value>,
@@ -203,17 +246,8 @@ async fn forgot_password(
     errs.finish()?;
 
     if let Some((user_id, _)) = user::login_row(&state.pool, &email).await? {
-        let token = gen_token(TOKEN_BYTES);
-        sqlx::query(
-            "INSERT INTO password_resets (user_id, token_hash, expires_at)
-             VALUES (?, ?, datetime('now', ?))",
-        )
-        .bind(user_id)
-        .bind(hash_secret(&token))
-        .bind(format!("+{RESET_TTL_MINUTES} minutes"))
-        .execute(&state.pool)
-        .await?;
-        let url = format!("{}/reset-password?token={token}", state.cfg.link_base());
+        let token = issue_reset_token(&state.pool, user_id).await?;
+        let url = format!("{}/reset-password#token={token}", state.cfg.link_base());
         if let Err(e) = state.notifier.send_password_reset(&email, &url) {
             tracing::error!(error = %e, "password reset notification failed");
         }
@@ -221,7 +255,8 @@ async fn forgot_password(
     ok(())
 }
 
-/// #12: set the new password, burn the token, revoke every session.
+/// #12: set the new password, burn every unused token of the user, revoke
+/// every session.
 async fn reset_password(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -255,6 +290,10 @@ async fn reset_password(
     if burned != 1 {
         return Err(ApiError::invalid_token());
     }
+    sqlx::query(BURN_UNUSED_RESETS)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
         .bind(&password_hash)
         .bind(user_id)

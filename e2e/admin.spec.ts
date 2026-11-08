@@ -5,7 +5,7 @@
  * delete, CMS JSON validation, attendance marking and the assessment logger.
  */
 import { expect, test, type Page } from '@playwright/test'
-import { makeOrder } from '../src/test/factories'
+import { makeEnrollment, makeOrder } from '../src/test/factories'
 import { installMockBackend } from './mock-backend'
 
 function nav(page: Page) {
@@ -216,6 +216,43 @@ test.describe('admin dashboard', () => {
       observed_on: todayWib(),
       class_id: null,
     })
+  })
+
+  test('the assessment class picker lists only attended or confirmed past classes', async ({
+    page,
+  }) => {
+    await installMockBackend(page, {
+      as: 'ADMIN',
+      enrollments: [
+        makeEnrollment({
+          id: 1,
+          class_id: 1,
+          class_title: 'Mengenal Syukur',
+          class_date: '2026-01-17',
+          status: 'ATTENDED',
+        }),
+        makeEnrollment({
+          id: 2,
+          class_id: 2,
+          class_title: 'Kelas Batal',
+          class_date: '2026-02-07',
+          status: 'CANCELLED',
+        }),
+        makeEnrollment({
+          id: 3,
+          class_id: 3,
+          class_title: 'Kelas Nanti',
+          class_date: '2099-01-03',
+          status: 'CONFIRMED',
+        }),
+      ],
+    })
+    await page.goto('/admin/dashboard?tab=students')
+    await page.getByRole('button', { name: 'Lihat profil Amina' }).click()
+    const dialog = page.getByRole('dialog', { name: 'Amina' })
+    const picker = dialog.getByRole('combobox', { name: /^Kelas terkait/ })
+    const options = await picker.locator('option').allTextContents()
+    expect(options).toEqual(['Tanpa kelas', 'Mengenal Syukur · 17 Jan 2026'])
   })
 
   test('student search narrows the directory', async ({ page }) => {

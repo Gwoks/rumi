@@ -105,10 +105,13 @@ describe('parseField', () => {
     expect(parse('active', false)).toEqual({ ok: true, value: false })
   })
 
-  it('accepts https:// or same-origin paths for urls, never //host', () => {
+  it('accepts https:// or same-origin paths for urls, never //host or a backslash', () => {
     expect(parse('image', 'https://example.com/a.jpg')).toMatchObject({ ok: true })
     expect(parse('image', '/brand/a.jpg')).toMatchObject({ ok: true })
     expect(parse('image', '//evil.example/a.jpg')).toMatchObject({ ok: false })
+    expect(parse('image', '/\\evil.example/a.jpg')).toMatchObject({ ok: false })
+    expect(parse('image', '/brand\\a.svg')).toMatchObject({ ok: false })
+    expect(parse('image', 'https://x.id\\@evil.example/a.png')).toMatchObject({ ok: false })
     expect(parse('image', 'javascript:alert(1)')).toMatchObject({ ok: false })
     expect(parse('image', '')).toEqual({ ok: true, value: null })
   })

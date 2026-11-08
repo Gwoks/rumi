@@ -1,10 +1,11 @@
 //! In-memory token-bucket rate limiter, ported from hookbox `limiter.rs`
 //! (proportional refill, `retry_after`, idle eviction, bounded map).
 //!
-//! PRD §5.3.4: one bucket per (endpoint, client IP) holding
-//! `AUTH_RATE_LIMIT_PER_MIN` tokens, refilled continuously at that rate. Every
-//! request takes one token. `limit <= 0` means unlimited. The auth endpoints
-//! are low-traffic, so a single mutex-guarded map is plenty (KISS).
+//! PRD §5.3.4: buckets per (endpoint, client subject), per login email and
+//! per checkout parent, each refilled continuously. Every `check` takes one
+//! token. `limit <= 0` means unlimited. Traffic is low, so a single
+//! mutex-guarded map is plenty (KISS). Each bucket remembers its own capacity
+//! and refill rate, so eviction can tell whether it has refilled completely.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
@@ -23,6 +24,18 @@ pub struct RateLimitResult {
 struct Bucket {
     tokens: f64,
     last_refill: Instant,
+    capacity: f64,
+    refill_per_sec: f64,
+}
+
+impl Bucket {
+    /// Would this bucket be full at `now`? A full bucket equals a missing one.
+    fn is_full_at(&self, now: Instant) -> bool {
+        let elapsed = now
+            .saturating_duration_since(self.last_refill)
+            .as_secs_f64();
+        self.tokens + elapsed * self.refill_per_sec >= self.capacity
+    }
 }
 
 #[derive(Default)]
@@ -70,7 +83,11 @@ impl Limiter {
         let bucket = map.entry(key.to_string()).or_insert(Bucket {
             tokens: capacity,
             last_refill: now,
+            capacity,
+            refill_per_sec,
         });
+        bucket.capacity = capacity;
+        bucket.refill_per_sec = refill_per_sec;
         let elapsed = now
             .saturating_duration_since(bucket.last_refill)
             .as_secs_f64();
@@ -91,12 +108,24 @@ impl Limiter {
         }
     }
 
-    /// Drop buckets idle for at least `idle` (called by the sweep task).
+    /// Forget `key` (a successful login clears its failure bucket).
+    pub fn clear(&self, key: &str) {
+        self.map().remove(key);
+    }
+
+    /// Drop buckets idle for at least `idle` that have also refilled
+    /// completely (called by the sweep task, §5.9.6 step 4). A drained bucket
+    /// is kept, because evicting it would hand back a full one.
     pub fn evict_idle(&self, idle: Duration) -> usize {
-        let now = Instant::now();
+        self.evict_idle_at(idle, Instant::now())
+    }
+
+    fn evict_idle_at(&self, idle: Duration, now: Instant) -> usize {
         let mut map = self.map();
         let before = map.len();
-        map.retain(|_, b| now.saturating_duration_since(b.last_refill) < idle);
+        map.retain(|_, b| {
+            now.saturating_duration_since(b.last_refill) < idle || !b.is_full_at(now)
+        });
         before - map.len()
     }
 }
@@ -157,13 +186,34 @@ mod tests {
     }
 
     #[test]
-    fn evict_idle_drops_stale_buckets() {
+    fn evict_idle_drops_only_idle_and_refilled_buckets() {
         let l = Limiter::new();
-        l.check("a", 5, 60);
-        l.check("b", 5, 60);
-        assert_eq!(l.evict_idle(Duration::from_secs(600)), 0);
-        assert_eq!(l.evict_idle(Duration::ZERO), 2);
-        assert!(l.is_empty());
+        let now = Instant::now();
+        let earlier = now - Duration::from_secs(120);
+        // Used two minutes ago at 5/min: refilled by now.
+        l.check_at("refilled", 5, 60, earlier);
+        // Used two minutes ago at 5 per 15 min: still drained.
+        for _ in 0..5 {
+            l.check_at("drained", 5, 900, earlier);
+        }
+        // Used just now: not idle.
+        l.check_at("fresh", 5, 60, now);
+        assert_eq!(l.evict_idle_at(Duration::from_secs(600), now), 0);
+        assert_eq!(l.evict_idle_at(Duration::from_secs(60), now), 1);
+        assert_eq!(l.len(), 2);
+        // An evicted bucket would come back full, so a drained one must stay.
+        assert!(!l.check_at("drained", 5, 900, now).allowed);
+        assert_eq!(l.evict_idle(Duration::ZERO), 0);
+    }
+
+    #[test]
+    fn clear_forgets_a_bucket() {
+        let l = Limiter::new();
+        assert!(l.check("login-fail:a@b.co", 1, 900).allowed);
+        assert!(!l.check("login-fail:a@b.co", 1, 900).allowed);
+        l.clear("login-fail:a@b.co");
+        l.clear("never-seen");
+        assert!(l.check("login-fail:a@b.co", 1, 900).allowed);
     }
 
     #[test]

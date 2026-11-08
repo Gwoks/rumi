@@ -6,6 +6,10 @@
 //! 2. Admin bootstrap when no `ADMIN` exists: `ADMIN_EMAIL`/`ADMIN_PASSWORD`,
 //!    else the demo admin under `SEED_DEMO=true`, else a WARN.
 //! 3. Demo data under `SEED_DEMO=true` while `nadia@example.com` is absent.
+//!
+//! Demo guard (§5.11.1): on an `https://` `PUBLIC_BASE_URL` the demo admin and
+//! the demo data are refused (ERROR log) unless `ALLOW_DEMO_SEED_IN_PROD=true`,
+//! so a production box never boots with the published demo passwords.
 
 use sqlx::SqlitePool;
 
@@ -32,9 +36,14 @@ pub struct SeedReport {
 }
 
 pub async fn run(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<SeedReport> {
+    if cfg.seed_demo && !cfg.demo_seed_allowed() {
+        tracing::error!(
+            "SEED_DEMO=true refused: PUBLIC_BASE_URL is https:// (set ALLOW_DEMO_SEED_IN_PROD=true for a public demo)"
+        );
+    }
     let (cms, classes, kits) = catalog::seed(pool).await?;
     let admin_created = bootstrap_admin(pool, cfg).await?;
-    let demo = cfg.seed_demo && demo::seed(pool, cfg).await?;
+    let demo = cfg.demo_seed_allowed() && demo::seed(pool, cfg).await?;
     Ok(SeedReport {
         cms,
         classes,
@@ -98,7 +107,7 @@ async fn bootstrap_admin(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<Opti
         create_admin(pool, cfg, &email, &cfg.admin_password).await?;
         return Ok(Some(email));
     }
-    if cfg.seed_demo {
+    if cfg.demo_seed_allowed() {
         create_admin(pool, cfg, DEMO_ADMIN_EMAIL, DEMO_ADMIN_PASSWORD).await?;
         return Ok(Some(DEMO_ADMIN_EMAIL.to_string()));
     }
@@ -150,6 +159,58 @@ mod tests {
             .unwrap();
         run(&pool, &cfg("", "", false)).await.unwrap();
         assert!(admins(&pool).await.is_empty());
+    }
+
+    fn on_https(base: Config, allow: bool) -> Config {
+        Config {
+            public_base_url: "https://rumi.id".into(),
+            allow_demo_seed_in_prod: allow,
+            ..base
+        }
+    }
+
+    async fn parents(pool: &SqlitePool) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE role = 'PARENT'")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn demo_seed_is_refused_on_a_public_https_deployment() {
+        let pool = crate::testutil::pool().await;
+        let report = run(&pool, &on_https(cfg("", "", true), false))
+            .await
+            .unwrap();
+        assert!(
+            report.cms && report.classes && report.kits,
+            "catalog still seeds"
+        );
+        assert_eq!(report.admin_created, None);
+        assert!(!report.demo);
+        assert!(admins(&pool).await.is_empty());
+        assert_eq!(parents(&pool).await, 0);
+    }
+
+    #[tokio::test]
+    async fn env_admin_still_bootstraps_when_the_demo_is_refused() {
+        let pool = crate::testutil::pool().await;
+        let c = on_https(cfg("boss@rumi.id", "rahasia-panjang", true), false);
+        let report = run(&pool, &c).await.unwrap();
+        assert_eq!(report.admin_created.as_deref(), Some("boss@rumi.id"));
+        assert!(!report.demo);
+        assert_eq!(parents(&pool).await, 0);
+    }
+
+    #[tokio::test]
+    async fn allow_demo_seed_in_prod_lets_a_public_demo_seed() {
+        let pool = crate::testutil::pool().await;
+        let report = run(&pool, &on_https(cfg("", "", true), true))
+            .await
+            .unwrap();
+        assert_eq!(report.admin_created.as_deref(), Some(DEMO_ADMIN_EMAIL));
+        assert!(report.demo);
+        assert_eq!(parents(&pool).await, 1);
     }
 
     #[tokio::test]

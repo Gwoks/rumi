@@ -15,7 +15,12 @@ import { useToast } from '@/components/ui/toast'
 import { apiErrorMessage, apiFieldErrors } from '@/lib/api-errors'
 import { t } from '@/lib/copy'
 import { todayWib } from '@/lib/format'
-import { childFormSchema, validateForm, type FormErrors } from '@/lib/validation'
+import {
+  childEditFormSchema,
+  childFormSchema,
+  validateForm,
+  type FormErrors,
+} from '@/lib/validation'
 
 interface ChildFormValues {
   name: string
@@ -68,7 +73,9 @@ function ChildForm({ child, onSaved, onCancel }: ChildFormProps) {
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault()
     setFormError(null)
-    const result = validateForm(childFormSchema, values)
+    // Editing re-checks the dob only if it changed (PATCH sends only changes).
+    const schema = child ? childEditFormSchema(child.dob) : childFormSchema
+    const result = validateForm(schema, values)
     if (!result.success) {
       setErrors(result.errors)
       setFormError(t('parent.child.formError'))

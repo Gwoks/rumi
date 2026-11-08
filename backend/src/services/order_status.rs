@@ -79,7 +79,8 @@ pub async fn transition(pool: &SqlitePool, order_id: i64, to: &str) -> Result<()
 }
 
 /// Sweep step 1 (§5.9.6): cancel every `PENDING_WA` order older than the TTL.
-/// Returns how many were cancelled.
+/// Each order is its own transaction; one that fails is logged with its id
+/// and skipped, so it never blocks the others. Returns how many were cancelled.
 pub async fn cancel_expired(pool: &SqlitePool, ttl_hours: i64) -> Result<u64, ApiError> {
     let ids: Vec<i64> = sqlx::query_scalar(
         "SELECT id FROM orders WHERE status = 'PENDING_WA' AND created_at <= datetime('now', ?)",
@@ -93,7 +94,9 @@ pub async fn cancel_expired(pool: &SqlitePool, ttl_hours: i64) -> Result<u64, Ap
             Ok(()) => cancelled += 1,
             // Paid or cancelled meanwhile by an admin: nothing to do.
             Err(e) if e.code == "invalid_transition" => {}
-            Err(e) => return Err(e),
+            Err(e) => {
+                tracing::error!(order_id = id, error = %e, "sweep: expired order not cancelled (skipped)");
+            }
         }
     }
     Ok(cancelled)

@@ -229,7 +229,76 @@ async fn expired_session_is_anonymous() {
 }
 
 fn token_from(url: &str) -> String {
-    url.split("token=").nth(1).unwrap().to_string()
+    url.split("#token=").nth(1).unwrap().to_string()
+}
+
+async fn forgot(t: &TestApp, email: &str) -> Resp {
+    call(
+        t,
+        "POST",
+        "/api/auth/forgot-password",
+        None,
+        Some(json!({"email": email})),
+    )
+    .await
+}
+
+async fn reset(t: &TestApp, token: &str, password: &str) -> Resp {
+    call(
+        t,
+        "POST",
+        "/api/auth/reset-password",
+        None,
+        Some(json!({"token": token, "password": password})),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_new_reset_link_invalidates_the_older_ones() {
+    let t = app().await;
+    register(&t, "nadia@example.com").await;
+    forgot(&t, "nadia@example.com").await;
+    forgot(&t, "nadia@example.com").await;
+    let sent = t.notifier.sent();
+    let (old, new) = (token_from(&sent[0].1), token_from(&sent[1].1));
+    assert_ne!(old, new);
+    assert_eq!(
+        reset(&t, &old, "kata-sandi-lama").await.code(),
+        "invalid_token"
+    );
+    assert_eq!(
+        reset(&t, &new, "kata-sandi-baru").await.status,
+        StatusCode::OK
+    );
+    login(&t, "nadia@example.com", "kata-sandi-baru").await;
+}
+
+#[tokio::test]
+async fn a_successful_reset_burns_every_unused_token_of_that_user() {
+    let t = app().await;
+    let p = register(&t, "nadia@example.com").await;
+    forgot(&t, "nadia@example.com").await;
+    let token = token_from(&t.notifier.sent()[0].1);
+    // A stale token issued another way (e.g. before this rule) must die too.
+    sqlx::query(
+        "INSERT INTO password_resets (user_id, token_hash, expires_at)
+         VALUES (?, 'stale-hash', datetime('now', '+30 minutes'))",
+    )
+    .bind(p.user_id)
+    .execute(&t.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        reset(&t, &token, "kata-sandi-baru").await.status,
+        StatusCode::OK
+    );
+    let unused = scalar(
+        &t.pool,
+        "SELECT COUNT(*) FROM password_resets WHERE used_at IS NULL",
+    )
+    .await;
+    assert_eq!(unused, 0);
 }
 
 #[tokio::test]
@@ -273,9 +342,11 @@ async fn forgot_and_reset_password_flow_revokes_sessions() {
     let sent = t.notifier.sent();
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].0, "nadia@example.com");
+    // The token rides in the fragment, never in the query (§5.8.3 #11).
     assert!(sent[0]
         .1
-        .starts_with("http://localhost:8080/reset-password?token="));
+        .starts_with("http://localhost:8080/reset-password#token="));
+    assert!(!sent[0].1.contains('?'));
     let token = token_from(&sent[0].1);
     assert_eq!(token.len(), 43);
 
@@ -331,7 +402,7 @@ async fn reset_rejects_unknown_expired_and_weak_input() {
     )
     .await;
     let url = t.notifier.sent()[0].1.clone();
-    assert!(url.starts_with("https://rumi-stg.kasibah.com/reset-password?token="));
+    assert!(url.starts_with("https://rumi-stg.kasibah.com/reset-password#token="));
     let token = token_from(&url);
 
     let weak = call(
@@ -419,4 +490,113 @@ async fn auth_endpoints_are_rate_limited_per_endpoint_with_retry_after() {
     for _ in 0..5 {
         assert_eq!(get(&t, "/api/auth/me", None).await.status, StatusCode::OK);
     }
+}
+
+/// A request that arrived through nginx on loopback for `client`.
+fn forgot_from(client: &str) -> axum::http::Request<axum::body::Body> {
+    let mut req = request(
+        "POST",
+        "/api/auth/forgot-password",
+        None,
+        Some(&json!({"email": "a@b.co"})),
+    );
+    let peer: std::net::SocketAddr = "[::1]:40000".parse().unwrap();
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(peer));
+    req.headers_mut()
+        .insert("x-real-ip", client.parse().unwrap());
+    req
+}
+
+#[tokio::test]
+async fn ipv6_clients_share_one_bucket_per_64() {
+    let cfg = rumi::config::Config {
+        auth_rate_limit_per_min: 1,
+        ..test_config()
+    };
+    let t = app_with(cfg).await;
+    let status = |r: Resp| r.status;
+    assert_eq!(
+        status(send(&t.app, forgot_from("2001:db8:1:2::1")).await),
+        StatusCode::OK
+    );
+    // Another address in the same /64 is the same subscriber.
+    let rotated = send(&t.app, forgot_from("2001:db8:1:2:abcd:ef01:2345:6789")).await;
+    assert_eq!(rotated.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(rotated.code(), "rate_limited");
+    // A different /64 and an IPv4 client have their own buckets.
+    assert_eq!(
+        status(send(&t.app, forgot_from("2001:db8:1:3::1")).await),
+        StatusCode::OK
+    );
+    assert_eq!(
+        status(send(&t.app, forgot_from("203.0.113.7")).await),
+        StatusCode::OK
+    );
+    // IPv4-mapped IPv6 counts as the IPv4 address.
+    assert_eq!(
+        status(send(&t.app, forgot_from("::ffff:203.0.113.7")).await),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+async fn login_as(t: &TestApp, email: &str, password: &str) -> Resp {
+    call(
+        t,
+        "POST",
+        "/api/auth/login",
+        None,
+        Some(json!({"email": email, "password": password})),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn five_failed_logins_lock_that_email_even_for_the_right_password() {
+    let t = app().await;
+    register(&t, "nadia@example.com").await;
+    for _ in 0..5 {
+        let r = login_as(&t, "nadia@example.com", "salah-sandi").await;
+        assert_eq!(r.code(), "invalid_credentials");
+    }
+    let locked = login_as(&t, "Nadia@Example.com", PASSWORD).await;
+    assert_eq!(locked.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(locked.code(), "rate_limited");
+    let retry: i64 = locked.header("retry-after").unwrap().parse().unwrap();
+    assert!((1..=180).contains(&retry), "{retry}");
+    // Other accounts are untouched.
+    register(&t, "siti@example.com").await;
+    assert_eq!(
+        login_as(&t, "siti@example.com", PASSWORD).await.status,
+        StatusCode::OK
+    );
+    // Unknown emails are bucketed the same way (no account enumeration).
+    for _ in 0..5 {
+        login_as(&t, "ghost@example.com", "x").await;
+    }
+    assert_eq!(
+        login_as(&t, "ghost@example.com", "x").await.code(),
+        "rate_limited"
+    );
+}
+
+#[tokio::test]
+async fn a_successful_login_clears_the_failure_bucket() {
+    let t = app().await;
+    register(&t, "nadia@example.com").await;
+    for _ in 0..4 {
+        login_as(&t, "nadia@example.com", "salah-sandi").await;
+    }
+    assert_eq!(
+        login_as(&t, "nadia@example.com", PASSWORD).await.status,
+        StatusCode::OK
+    );
+    for _ in 0..4 {
+        let r = login_as(&t, "nadia@example.com", "salah-sandi").await;
+        assert_eq!(r.code(), "invalid_credentials");
+    }
+    assert_eq!(
+        login_as(&t, "nadia@example.com", PASSWORD).await.status,
+        StatusCode::OK
+    );
 }

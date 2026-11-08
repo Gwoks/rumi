@@ -4,6 +4,8 @@
  * key, a wrong type or an EXTRA key (zod strips unknown keys, so `toEqual`
  * catches it) fails here before it can hide a real contract drift.
  */
+import fs from 'node:fs'
+import path from 'node:path'
 import { expect, test } from '@playwright/test'
 import type { z } from 'zod'
 import {
@@ -53,7 +55,14 @@ import {
   SEED_CLASSES,
   SEED_KITS,
 } from '../src/test/factories'
-import { checkout, computeMetrics, createMockState, transitionOrder } from './support/mock-store'
+import { SERVER_ERROR_CODES } from '../src/api/errors'
+import {
+  checkout,
+  computeMetrics,
+  createMockState,
+  MAX_PENDING_ORDERS,
+  transitionOrder,
+} from './support/mock-store'
 
 function roundTrip<T extends z.ZodTypeAny>(schema: T, value: unknown, label: string) {
   const parsed = schema.safeParse(value)
@@ -148,4 +157,39 @@ test('the mock store produces contract-valid orders, transitions and metrics', (
   roundTrip(orderSchema, transitionOrder(state, order.id, 'CANCELLED'), 'cancelled order')
   expect(state.kits.find((k) => k.id === 1)?.stock).toBe(12)
   expect(() => transitionOrder(state, order.id, 'PAID')).toThrow(/Status tidak dapat diubah/)
+})
+
+test('the frontend error-code list matches the PRD §5.2 table exactly', () => {
+  const prd = fs.readFileSync(path.join(process.cwd(), 'docs/features/rumi-v1/prd.md'), 'utf8')
+  const table = prd.slice(
+    prd.indexOf('### 5.2 Error codes'),
+    prd.indexOf('**Frontend-only codes**'),
+  )
+  const documented = [...table.matchAll(/^\| \d{3} \| `([a-z_]+)` \|/gm)].map((m) => m[1])
+  expect(documented.length).toBeGreaterThan(0)
+  expect([...SERVER_ERROR_CODES].sort()).toEqual([...documented].sort())
+})
+
+test('the mock enforces the PENDING_WA cap after answering replays (§5.9.1)', () => {
+  const state = createMockState({
+    orders: Array.from({ length: MAX_PENDING_ORDERS }, (_, i) => makeOrder({ id: 10 + i })),
+  })
+  const body = {
+    idempotency_key: '0B5C7D1E-8F6A-4B2C-9D3E-1A2B3C4D5E6F',
+    items: [{ type: 'KIT' as const, kit_id: 1, quantity: 1 }],
+    delivery: { name: 'Nadia Rahman', phone_wa: '6281211112222', address: 'Jl. Kemang Raya 12' },
+  }
+  expect(() => checkout(state, makeUser(), body)).toThrow(/menunggu konfirmasi/)
+  const error = (() => {
+    try {
+      checkout(state, makeUser(), body)
+    } catch (err) {
+      return err as { status: number; code: string }
+    }
+  })()
+  expect(error).toMatchObject({ status: 409, code: 'too_many_pending_orders' })
+  roundTrip(errorEnvelopeSchema, fail('too_many_pending_orders', 'x'), 'cap envelope')
+  // Settled orders do not count.
+  state.orders = state.orders.map((o, i) => (i === 0 ? { ...o, status: 'PAID' as const } : o))
+  expect(checkout(state, makeUser(), body)[0]).toBe(201)
 })

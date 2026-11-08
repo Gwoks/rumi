@@ -97,6 +97,29 @@ fn attendance_guard(from: &str, to: &str, class_date: &str) -> Result<(), ApiErr
     Ok(())
 }
 
+/// Compare-and-set `from` → `to` (§6.30): if another request changed the
+/// enrollment since it was read, nothing is written and the answer is
+/// `409 invalid_transition` instead of a silent success.
+async fn set_attendance(
+    pool: &sqlx::SqlitePool,
+    id: i64,
+    from: &str,
+    to: &str,
+) -> Result<(), ApiError> {
+    let changed =
+        sqlx::query("UPDATE class_enrollments SET status = ? WHERE id = ? AND status = ?")
+            .bind(to)
+            .bind(id)
+            .bind(from)
+            .execute(pool)
+            .await?
+            .rows_affected();
+    if changed == 0 {
+        return Err(ApiError::invalid_transition(from, to));
+    }
+    Ok(())
+}
+
 /// #38: `{ status: 'ATTENDED' | 'ABSENT' }`.
 async fn mark_attendance(
     State(state): State<AppState>,
@@ -113,14 +136,7 @@ async fn mark_attendance(
         .ok_or_else(ApiError::not_found)?;
     attendance_guard(&current.status, &to, &current.class_date)?;
     if current.status != to {
-        sqlx::query(
-            "UPDATE class_enrollments SET status = ?
-             WHERE id = ? AND status IN ('CONFIRMED', 'ATTENDED', 'ABSENT')",
-        )
-        .bind(&to)
-        .bind(id)
-        .execute(&state.pool)
-        .await?;
+        set_attendance(&state.pool, id, &current.status, &to).await?;
     }
     ok(enrollment::find(&state.pool, id)
         .await?
@@ -130,6 +146,62 @@ async fn mark_attendance(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One enrollment (id 1) in `status` for a past class.
+    async fn enrollment_in(status: &str) -> sqlx::SqlitePool {
+        let pool = crate::testutil::pool().await;
+        let statements = [
+            "INSERT INTO users (id, email, password_hash, full_name, phone_wa)
+             VALUES (1, 'p@x.co', 'h', 'P', '6281211112222')",
+            "INSERT INTO children (id, parent_id, name, dob) VALUES (1, 1, 'A', '2021-01-01')",
+            "INSERT INTO weekend_classes (id, title, description, location, age_min, age_max, date,
+             start_time, end_time, fee_idr, capacity, seats_booked, status)
+             VALUES (1, 'K', 'd', 'L', 3, 6, '2020-01-01', '09:30', '11:30', 0, 12, 1, 'CLOSED')",
+            "INSERT INTO orders (id, order_code, parent_id, total_amount_idr, delivery_name,
+             delivery_phone, wa_message_payload, idempotency_key)
+             VALUES (1, 'RUMI-2020-0001', 1, 0, 'N', '6281211112222', 'm', 'k1')",
+            "INSERT INTO order_items (id, order_id, item_type, class_id, child_id, name_snapshot,
+             unit_price_idr, quantity, line_total_idr) VALUES (1, 1, 'CLASS', 1, 1, 'K', 0, 1, 0)",
+        ];
+        for sql in statements {
+            sqlx::query(sql).execute(&pool).await.unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO class_enrollments (id, class_id, child_id, order_item_id, status)
+             VALUES (1, 1, 1, 1, ?)",
+        )
+        .bind(status)
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn attendance_update_is_a_compare_and_set() {
+        let pool = enrollment_in("CONFIRMED").await;
+        set_attendance(&pool, 1, "CONFIRMED", "ATTENDED")
+            .await
+            .unwrap();
+        let now = enrollment::find(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(now.status, "ATTENDED");
+        // A stale read (the row changed meanwhile) must not report success.
+        let stale = set_attendance(&pool, 1, "CONFIRMED", "ABSENT")
+            .await
+            .unwrap_err();
+        assert_eq!(stale.code, "invalid_transition");
+        let still = enrollment::find(&pool, 1).await.unwrap().unwrap();
+        assert_eq!(still.status, "ATTENDED");
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_enrollment_is_never_overwritten() {
+        let pool = enrollment_in("CANCELLED").await;
+        let err = set_attendance(&pool, 1, "CONFIRMED", "ATTENDED")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_transition");
+    }
 
     #[test]
     fn attendance_rules() {
