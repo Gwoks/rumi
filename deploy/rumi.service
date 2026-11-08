@@ -1,0 +1,33 @@
+# RUMI systemd unit template — rendered by deploy/deploy.sh ({{APP_DIR}},
+# {{APP_PORT}}, {{DOMAIN}}, {{PUBLIC_BASE_URL}}) into
+# /etc/systemd/system/rumi.service. Do not put secrets in this file.
+[Unit]
+Description=RUMI API Server ({{DOMAIN}})
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory={{APP_DIR}}/backend
+ExecStart={{APP_DIR}}/backend/target/release/rumi
+# Non-secret settings. nginx fronts the app, so it binds to loopback only.
+Environment="DATABASE_PATH={{APP_DIR}}/data/rumi.db"
+Environment="STATIC_DIR={{APP_DIR}}/dist"
+Environment="APP_BIND_HOST=127.0.0.1"
+Environment="APP_PORT={{APP_PORT}}"
+Environment="PUBLIC_BASE_URL={{PUBLIC_BASE_URL}}"
+Environment="SEED_DEMO=false"
+# Secrets and per-host overrides (ADMIN_EMAIL, ADMIN_PASSWORD,
+# RUMI_ADMIN_WA_PHONE, ...) live outside the repo in a root-only file:
+#   sudo install -d -m 755 /etc/rumi
+#   sudo install -m 600 -o root -g root /dev/null /etc/rumi/rumi.env
+# Values there override the Environment= lines above. The leading "-" keeps
+# the unit startable before the file exists (no admin is bootstrapped then).
+EnvironmentFile=-/etc/rumi/rumi.env
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

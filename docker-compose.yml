@@ -1,0 +1,55 @@
+# RUMI deployment — a SINGLE app container (Rust binary + SQLite + the built
+# SPA). No Postgres, no Redis, no Node at runtime.
+#
+#   docker compose up --build   # builds + starts the single app container
+#   docker compose down         # stops; the named volume PERSISTS the SQLite DB
+#   docker compose down -v      # ALSO wipes the volume (fresh DB)
+#
+# All knobs are env-overridable; `.env` in this directory is auto-loaded (copy
+# .env.example to .env). Defaults mirror PRD §5.10.
+
+services:
+  app:
+    build: .
+    environment:
+      # --- storage (one WAL SQLite file on the named volume) -----------------
+      DATABASE_PATH: ${DATABASE_PATH:-/app/data/rumi.db}
+      STATIC_DIR: ${STATIC_DIR:-/app/dist}
+      # --- network ------------------------------------------------------------
+      # APP_PORT is NOT set here on purpose: the container's internal listen
+      # port stays fixed at 8080 (Dockerfile ENV/EXPOSE/HEALTHCHECK all assume
+      # it). Relocate the published port via the host side of the `ports:`
+      # mapping below instead — setting APP_PORT here would move the binary's
+      # listen port out from under that fixed container-side mapping.
+      APP_BIND_HOST: ${APP_BIND_HOST:-0.0.0.0}
+      # Public origin (no trailing slash): reset links, the CSRF Origin
+      # allow-list and COOKIE_SECURE=auto. Empty = http://localhost:<port>.
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-auto}
+      # --- admin bootstrap (PRD §5.11.1) --------------------------------------
+      # NO defaults on purpose. Set BOTH in .env (password >= 8 chars) to create
+      # the first ADMIN. Left empty, no admin is created (WARN) — unless
+      # SEED_DEMO=true, which creates the publicly known demo admin.
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      RUMI_ADMIN_WA_PHONE: ${RUMI_ADMIN_WA_PHONE:-6281234567890}
+      # Demo accounts + data (§5.11.4). Local only; never on a reachable host.
+      SEED_DEMO: ${SEED_DEMO:-false}
+      # --- business rules / housekeeping --------------------------------------
+      PENDING_ORDER_TTL_HOURS: ${PENDING_ORDER_TTL_HOURS:-48}
+      SESSION_TTL_DAYS: ${SESSION_TTL_DAYS:-30}
+      AUTH_RATE_LIMIT_PER_MIN: ${AUTH_RATE_LIMIT_PER_MIN:-10}
+      SWEEP_INTERVAL_SECONDS: ${SWEEP_INTERVAL_SECONDS:-300}
+      RUST_LOG: ${RUST_LOG:-info}
+    ports:
+      # host:container — the container always listens on 8080 (see the note
+      # above); change the host side to relocate the published port.
+      - "${APP_PORT:-8080}:8080"
+    volumes:
+      - rumi_data:/app/data
+    restart: unless-stopped
+
+# Named volume: the SQLite DB (users, sessions, orders, catalog) survives
+# `docker compose down && up` (without -v).
+volumes:
+  rumi_data:
